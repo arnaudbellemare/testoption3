@@ -253,7 +253,7 @@ def fetch_kraken_data():
     return full_df[~full_df.index.duplicated()]
 
 ###########################################
-# EWMA-ROGER SATCHELL VOLATILITY CALCULATION
+# VOLATILITY CALCULATIONS
 ###########################################
 def calculate_ewma_roger_satchell_volatility(price_data, span=days_to_expiry):
     df = price_data.copy()
@@ -278,9 +278,6 @@ def compute_realized_volatility_5min(df, annualize_days=365):
     realized_vol = np.sqrt(total_variance) * annualization_factor
     return realized_vol
 
-###########################################
-# BTC DAILY ANNUALIZED REALIZED VOLATILITY CALCULATION
-###########################################
 def calculate_btc_annualized_volatility_daily(df):
     if "date_time" not in df.columns:
         if isinstance(df.index, pd.DatetimeIndex):
@@ -308,7 +305,7 @@ def calculate_daily_realized_volatility_series(df):
     return volatility_series.dropna()
 
 ###########################################
-# NEW: Compute Daily Average IV and Historical VRP
+# DAILY AVERAGE IV & HISTORICAL VRP
 ###########################################
 def compute_daily_average_iv(df_iv_agg):
     daily_iv = df_iv_agg["iv_mean"].resample("D").mean(numeric_only=True).dropna().tolist()
@@ -319,7 +316,7 @@ def compute_historical_vrp(daily_iv, daily_rv):
     return [(iv ** 2) - (rv ** 2) for iv, rv in zip(daily_iv[:n], daily_rv[:n])]
 
 ###########################################
-# OPTION DELTA AND GAMMA CALCULATION (ADJUSTED)
+# OPTION DELTA CALCULATION
 ###########################################
 def compute_delta(row, S):
     try:
@@ -342,36 +339,8 @@ def compute_delta(row, S):
         return np.nan
     return norm.cdf(d1) if row["option_type"] == "C" else norm.cdf(d1) - 1
 
-def compute_gamma(row, S):
-    try:
-        expiry_str = row["instrument_name"].split("-")[1]
-        expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
-        expiry_date = expiry_date.replace(tzinfo=row["date_time"].tzinfo)
-    except Exception:
-        return np.nan
-    T = (expiry_date - row["date_time"]).total_seconds() / (365 * 24 * 3600)
-    if T <= 0:
-        return np.nan
-    K = row["k"]
-    sigma = row["iv_close"]
-    if sigma <= 0:
-        return np.nan
-    sigma_eff = sigma * risk_factor if 'risk_factor' in globals() else sigma
-    try:
-        d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
-    except Exception:
-        return np.nan
-    gamma = norm.pdf(d1) / (S * sigma_eff * np.sqrt(T))
-    return gamma
-
-def compute_gex(row, S, oi):
-    gamma_val = compute_gamma(row, S)
-    if gamma_val is None or np.isnan(gamma_val):
-        return np.nan
-    return gamma_val * oi * (S ** 2)
-
 ###########################################
-# EV CALCULATION FUNCTIONS (ADJUSTED FOR RISK)
+# EV & GAMMA EXPOSURE (GEX) CALCULATIONS
 ###########################################
 def adjust_ev(ev_value, position_side):
     if position_side.lower() == "long":
@@ -379,176 +348,12 @@ def adjust_ev(ev_value, position_side):
     else:
         return ev_value
 
-def calculate_atm_straddle_ev(ticker_list, spot_price, T, rv, position_side="short"):
-    tolerance = spot_price * 0.02  
-    atm_candidates = [item for item in ticker_list if abs(item["strike"] - spot_price) <= tolerance]
-    if not atm_candidates:
-        return None
-    atm_strikes = {}
-    for item in atm_candidates:
-        strike = item["strike"]
-        if strike not in atm_strikes:
-            atm_strikes[strike] = {"iv_sum": item["iv"], "count": 1}
-        else:
-            atm_strikes[strike]["iv_sum"] += item["iv"]
-            atm_strikes[strike]["count"] += 1
-    ev_candidates = []
-    for strike, data in atm_strikes.items():
-        avg_iv = data["iv_sum"] / data["count"]
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
-        ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
-        ev_value = adjust_ev(ev_value, position_side)
-        ev_candidates.append({"Strike": strike, "EV": ev_value, "Avg IV": avg_iv})
-    df_ev = pd.DataFrame(ev_candidates)
-    return df_ev.sort_values("EV", ascending=False)
-
-def calculate_limited_otm_put_ev(ticker_list, spot_price, T, rv, position_side="long"):
-    tolerance = spot_price * 0.10  
-    candidates = [item for item in ticker_list if item["option_type"] == "P" and item["strike"] < spot_price and (spot_price - item["strike"]) <= tolerance]
-    if not candidates:
-        return None
-    group = {}
-    for item in candidates:
-        strike = item["strike"]
-        if strike not in group:
-            group[strike] = {"iv_sum": item["iv"], "count": 1}
-        else:
-            group[strike]["iv_sum"] += item["iv"]
-            group[strike]["count"] += 1
-    ev_candidates = []
-    for strike, data in group.items():
-        avg_iv = data["iv_sum"] / data["count"]
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
-        ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
-        ev_value = adjust_ev(ev_value, position_side)
-        ev_candidates.append({"Strike": strike, "EV": ev_value, "Avg IV": avg_iv})
-    df_ev = pd.DataFrame(ev_candidates)
-    return df_ev.sort_values("EV", ascending=False)
-
-def calculate_call_spread_ev(ticker_list, spot_price, T, rv, position_side="short"):
-    tolerance = spot_price * 0.10  
-    candidates = [item for item in ticker_list if item["option_type"] == "C" and item["strike"] > spot_price and (item["strike"] - spot_price) <= tolerance]
-    if not candidates:
-        return None
-    group = {}
-    for item in candidates:
-        strike = item["strike"]
-        if strike not in group:
-            group[strike] = {"iv_sum": item["iv"], "count": 1}
-        else:
-            group[strike]["iv_sum"] += item["iv"]
-            group[strike]["count"] += 1
-    ev_candidates = []
-    for strike, data in group.items():
-        avg_iv = data["iv_sum"] / data["count"]
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
-        ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
-        ev_value = adjust_ev(ev_value, position_side)
-        ev_candidates.append({"Strike": strike, "EV": ev_value, "Avg IV": avg_iv})
-    df_ev = pd.DataFrame(ev_candidates)
-    return df_ev.sort_values("EV", ascending=False)
-
-def calculate_strangle_ev(ticker_list, spot_price, T, rv, position_side="short"):
-    tolerance = spot_price * 0.10  
-    candidates = [item for item in ticker_list if ((item["option_type"] == "C" and item["strike"] > spot_price and (item["strike"] - spot_price) <= tolerance)
-                                                     or (item["option_type"] == "P" and item["strike"] < spot_price and (spot_price - item["strike"]) <= tolerance))]
-    if not candidates:
-        return None
-    group = {}
-    for item in candidates:
-        strike = item["strike"]
-        if strike not in group:
-            group[strike] = {"iv_sum": item["iv"], "count": 1}
-        else:
-            group[strike]["iv_sum"] += item["iv"]
-            group[strike]["count"] += 1
-    ev_candidates = []
-    for strike, data in group.items():
-        avg_iv = data["iv_sum"] / data["count"]
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
-        ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
-        ev_value = adjust_ev(ev_value, position_side)
-        ev_candidates.append({"Strike": strike, "EV": ev_value, "Avg IV": avg_iv})
-    df_ev = pd.DataFrame(ev_candidates)
-    return df_ev.sort_values("EV", ascending=False)
-
-def calculate_naked_call_ev(ticker_list, spot_price, T, rv, position_side="short"):
-    candidates = [item for item in ticker_list if item["option_type"] == "C" and item["strike"] > spot_price]
-    if not candidates:
-        return None
-    group = {}
-    for item in candidates:
-        strike = item["strike"]
-        if strike not in group:
-            group[strike] = {"iv_sum": item["iv"], "count": 1}
-        else:
-            group[strike]["iv_sum"] += item["iv"]
-            group[strike]["count"] += 1
-    ev_candidates = []
-    for strike, data in group.items():
-        avg_iv = data["iv_sum"] / data["count"]
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
-        ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
-        ev_value = adjust_ev(ev_value, position_side)
-        ev_candidates.append({"Strike": strike, "EV": ev_value, "Avg IV": avg_iv})
-    df_ev = pd.DataFrame(ev_candidates)
-    return df_ev.sort_values("EV", ascending=False)
-
-def calculate_small_atm_straddle_ev(ticker_list, spot_price, T, rv, position_side="short"):
-    return calculate_atm_straddle_ev(ticker_list, spot_price, T, rv, position_side)
-
-###########################################
-# DYNAMIC VOLATILITY ADJUSTMENT USING VOLATILITY SMILE
-###########################################
-def adjust_volatility_with_smile(strike, smile_df):
-    sorted_smile = smile_df.sort_values("strike")
-    strikes = sorted_smile["strike"].values
-    ivs = sorted_smile["iv"].values
-    adjusted_iv = np.interp(strike, strikes, ivs)
-    return adjusted_iv
-
-def interpolate_iv(strikes, ivs, strike):
-    if not isinstance(strikes, (np.ndarray, list)) or not isinstance(ivs, (np.ndarray, list)):
-        raise ValueError("strikes and ivs must be arrays or lists.")
-    if len(strikes) != len(ivs):
-        raise ValueError("strikes and ivs must have the same length.")
-    if len(strikes) < 4:
-        raise ValueError("At least 4 points are required for cubic spline interpolation.")
-    valid_mask = ~np.isnan(strikes) & ~np.isnan(ivs) & ~np.isinf(strikes) & ~np.isinf(ivs)
-    strikes_clean = np.array(strikes)[valid_mask]
-    ivs_clean = np.array(ivs)[valid_mask]
-    if len(strikes_clean) < 4:
-        raise ValueError("At least 4 valid points are required for cubic spline interpolation.")
-    sort_idx = np.argsort(strikes_clean)
-    strikes_sorted = strikes_clean[sort_idx]
-    ivs_sorted = ivs_clean[sort_idx]
-    cs = CubicSpline(strikes_sorted, ivs_sorted)
-    if strike < strikes_sorted.min():
-        adjusted_iv = ivs_sorted[0]
-    elif strike > strikes_sorted.max():
-        adjusted_iv = ivs_sorted[-1]
-    else:
-        adjusted_iv = cs(strike)
-    return adjusted_iv
-
-###########################################
-# BUILD SMILE DATAFRAME FROM TICKER LIST
-###########################################
-def build_smile_df(ticker_list):
-    df = pd.DataFrame(ticker_list)
-    df = df.dropna(subset=["iv"])
-    smile_df = df.groupby("strike", as_index=False)["iv"].mean()
-    smile_df.rename(columns={"iv": "iv"}, inplace=True)
-    return smile_df
-
-###########################################
-# TICKER LIST BUILDER WITH SMILE ADJUSTMENT
-###########################################
+# In this function, we calculate EV and also compute Gamma Exposure (GEX) using the Black–Scholes gamma formula.
 def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0, position_side="short"):
     """
-    Build the ticker list and compute EV for each instrument.
-    The EV is now calculated conditionally based on the relative levels of IV and RV
-    and the recommended position.
+    Build the ticker list and compute EV and GEX for each instrument.
+    EV is conditionally calculated based on relative IV and RV.
+    GEX is computed as: gamma * open_interest * spot^2.
     """
     ticker_list = []
     for instrument in all_instruments:
@@ -563,6 +368,7 @@ def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0, position_side=
         raw_iv = ticker_data.get("iv", None)
         if raw_iv is None:
             continue
+        # Adjust IV using volatility smile
         adjusted_iv = adjust_volatility_with_smile(strike, smile_df)
         try:
             d1 = (np.log(spot / strike) + 0.5 * adjusted_iv**2 * T) / (adjusted_iv * np.sqrt(T))
@@ -570,7 +376,7 @@ def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0, position_side=
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
 
-        # Updated EV calculation conditional on position_side and relative IV/RV:
+        # Conditional EV calculation based on recommended position and IV vs RV
         if position_side.lower() == "short":
             if adjusted_iv > rv:
                 ev_value = (((adjusted_iv**2 - rv**2) * T) / 2) * 100
@@ -582,6 +388,15 @@ def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0, position_side=
             else:
                 ev_value = (((adjusted_iv**2 - rv**2) * T) / 2) * 100
 
+        # Calculate gamma using the Black–Scholes formula if adjusted_iv and T are valid
+        if adjusted_iv > 0 and T > 0:
+            d1_for_gamma = (np.log(spot/strike) + 0.5*adjusted_iv**2*T) / (adjusted_iv*np.sqrt(T))
+            gamma_val = norm.pdf(d1_for_gamma) / (spot * adjusted_iv * np.sqrt(T))
+        else:
+            gamma_val = 0
+        # Gamma Exposure (GEX) by Strike
+        gex_value = gamma_val * ticker_data["open_interest"] * (spot**2)
+
         ticker_list.append({
             "instrument": instrument,
             "strike": strike,
@@ -589,12 +404,46 @@ def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0, position_side=
             "open_interest": ticker_data["open_interest"],
             "delta": delta_est,
             "iv": adjusted_iv,
-            "EV": ev_value
+            "EV": ev_value,
+            "gex": gex_value
         })
     return ticker_list
 
 ###########################################
-# UPDATED TRADE STRATEGY EVALUATION
+# COMPOSITE SCORE CALCULATION
+###########################################
+def normalize_metrics(metrics):
+    arr = np.array(metrics)
+    if len(arr) <= 1 or np.std(arr) == 0:
+        return arr
+    return (arr - np.mean(arr)) / np.std(arr)
+
+def compute_composite_scores(ticker_list, position_side='short'):
+    # Ensure each ticker has a gex value; if missing, set to 0.
+    for item in ticker_list:
+        if 'gex' not in item:
+            item['gex'] = 0
+    ev_list = [item['EV'] for item in ticker_list]
+    gex_list = [item.get('gex', 0) for item in ticker_list]
+    oi_list = [item['open_interest'] for item in ticker_list]
+    
+    norm_ev = normalize_metrics(ev_list)
+    norm_gex = normalize_metrics(gex_list)
+    norm_oi = normalize_metrics(oi_list)
+    
+    # Use weights for EV, GEX, and open interest. Adjust as needed.
+    weights = {"ev": 0.5, "gex": (-0.3 if position_side.lower() == 'short' else 0.3), "oi": 0.2}
+    
+    for i, item in enumerate(ticker_list):
+        composite_score = (weights["ev"] * norm_ev[i] +
+                           weights["gex"] * norm_gex[i] +
+                           weights["oi"] * norm_oi[i])
+        item["composite_score"] = composite_score
+        item["strategy"] = position_side.capitalize()
+    return ticker_list
+
+###########################################
+# TRADE STRATEGY EVALUATION
 ###########################################
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
                             historical_vols=None, historical_vrps=None, expiry_date=None):
@@ -643,9 +492,9 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     df_calls = df[df["option_type"] == "C"].copy()
     df_puts = df[df["option_type"] == "P"].copy()
     if "gamma" not in df_calls.columns:
-        df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
+        df_calls["gamma"] = df_calls.apply(lambda row: compute_delta(row, spot_price), axis=1)
     if "gamma" not in df_puts.columns:
-        df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
+        df_puts["gamma"] = df_puts.apply(lambda row: compute_delta(row, spot_price), axis=1)
     avg_call_gamma = df_calls["gamma"].mean() if not df_calls.empty else 0
     avg_put_gamma = df_puts["gamma"].mean() if not df_puts.empty else 0
     
@@ -770,38 +619,6 @@ def classify_volatility_regime(current_vol, historical_vols):
         return "Medium Volatility"
 
 ###########################################
-# COMPOSITE SCORE CALCULATION
-###########################################
-def normalize_metrics(metrics):
-    arr = np.array(metrics)
-    if len(arr) <= 1 or np.std(arr) == 0:
-        return arr
-    return (arr - np.mean(arr)) / np.std(arr)
-
-def compute_composite_scores(ticker_list, position_side='short'):
-    # Ensure each ticker has a gamma value; if missing, set to 0.
-    for item in ticker_list:
-        if 'gamma' not in item:
-            item['gamma'] = 0
-    ev_list = [item['EV'] for item in ticker_list]
-    gamma_list = [item.get('gamma', 0) for item in ticker_list]
-    oi_list = [item['open_interest'] for item in ticker_list]
-    
-    norm_ev = normalize_metrics(ev_list)
-    norm_gamma = normalize_metrics(gamma_list)
-    norm_oi = normalize_metrics(oi_list)
-    
-    weights = {"ev": 0.5, "gamma": (-0.3 if position_side.lower() == 'short' else 0.3), "oi": 0.2}
-    
-    for i, item in enumerate(ticker_list):
-        composite_score = (weights["ev"] * norm_ev[i] +
-                           weights["gamma"] * norm_gamma[i] +
-                           weights["oi"] * norm_oi[i])
-        item["composite_score"] = composite_score
-        item["strategy"] = position_side.capitalize()
-    return ticker_list
-
-###########################################
 # MAIN DASHBOARD
 ###########################################
 def main():
@@ -896,7 +713,7 @@ def main():
         })
     smile_df = build_smile_df(preliminary_ticker_list)
     global ticker_list
-    # Pass the recommended position to build_ticker_list (e.g., "short" for short volatility)
+    # Pass "short" or "long" to indicate the recommended position for EV calculation.
     ticker_list = build_ticker_list(all_instruments, spot_price, T_YEARS, smile_df, rv=rv_scalar, position_side="short")
 
     rv_vol = calculate_btc_annualized_volatility_daily(df_kraken)
@@ -976,9 +793,6 @@ def main():
         st.write("Position Size: Adjust based on capital (e.g., 1-5% of portfolio for chosen risk tolerance)")
         st.write("Monitor price and volatility in real-time and adjust hedges dynamically.")
 
-    if not df_calls.empty and not df_puts.empty:
-        df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
-        df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
     st.subheader("Volatility Smile at Latest Timestamp")
     latest_ts = df["date_time"].max()
     smile_df_latest = df[df["date_time"] == latest_ts]
@@ -1016,7 +830,8 @@ def main():
         if candidate.empty:
             continue
         row = candidate.iloc[0]
-        gex = compute_gex(row, spot_price, oi)
+        # Compute GEX using the compute_gex function from earlier if needed
+        gex = row.get("gex", np.nan)
         gex_data.append({"strike": strike, "gex": gex, "option_type": option_type})
     df_gex = pd.DataFrame(gex_data)
     if not df_gex.empty:
@@ -1034,11 +849,11 @@ def main():
     
     df_combined = pd.concat([df_short, df_long], ignore_index=True)
     
-    # If 'gamma' is missing, fill it with 0 so the table can be displayed.
+    # If 'gex' is missing, fill it with 0 so the table can be displayed.
     if "EV" in df_combined.columns and "open_interest" in df_combined.columns:
-        if "gamma" not in df_combined.columns:
-            df_combined["gamma"] = 0
-        df_combined = df_combined[["instrument", "strategy", "EV", "gamma", "open_interest", "composite_score"]]
+        if "gex" not in df_combined.columns:
+            df_combined["gex"] = 0
+        df_combined = df_combined[["instrument", "strategy", "EV", "gex", "open_interest", "composite_score"]]
         st.subheader("Combined Composite Score Table")
         st.dataframe(df_combined)
     else:
