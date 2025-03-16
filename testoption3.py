@@ -1,8 +1,8 @@
 import streamlit as st
 import datetime as dt
 import pandas as pd
-import numpy as np
 import requests
+import numpy as np
 import ccxt
 from toolz.curried import *
 import plotly.express as px
@@ -14,7 +14,69 @@ from sklearn.model_selection import train_test_split
 from scipy.interpolate import CubicSpline
 
 ###########################################
-# EXPIRATION DATE SELECTION FUNCTIONS
+# Global Settings
+###########################################
+BASE_URL = "https://thalex.com/api/v2/public"
+instruments_endpoint = "instruments"  # Endpoint for fetching available instruments
+url_instruments = f"{BASE_URL}/{instruments_endpoint}"
+mark_price_endpoint = "mark_price_historical_data"
+url_mark_price = f"{BASE_URL}/{mark_price_endpoint}"
+TICKER_ENDPOINT = "ticker"
+URL_TICKER = f"{BASE_URL}/{TICKER_ENDPOINT}"
+
+DEFAULT_EXPIRY_STR = "28MAR25"  # Expected format: %d%b%y
+expiry_date = dt.datetime.strptime(DEFAULT_EXPIRY_STR, "%d%b%y")
+current_date = dt.datetime.now()
+days_to_expiry = (expiry_date - current_date).days
+T_YEARS = days_to_expiry / 365
+
+# Dictionary for rolling window configuration (if needed later)
+windows = {"7D": "vrp_7d"}
+
+def params(instrument_name):
+    now = dt.datetime.now()
+    start_dt = now - dt.timedelta(days=7)
+    return {
+        "from": int(start_dt.timestamp()),
+        "to": int(now.timestamp()),
+        "resolution": "5m",
+        "instrument_name": instrument_name,
+    }
+
+# Column names returned by the Thalex API for mark price data
+COLUMNS = [
+    "ts",
+    "mark_price_open",
+    "mark_price_high",
+    "mark_price_low",
+    "mark_price_close",
+    "iv_open",
+    "iv_high",
+    "iv_low",
+    "iv_close",
+]
+
+###########################################
+# Sophisticated Risk Adjustment using Cornish-Fisher
+###########################################
+def compute_risk_adjustment_factor_cf(df, alpha=0.05):
+    """
+    Computes a risk adjustment factor using the Cornish-Fisher expansion.
+    Returns the absolute ratio |z_cf / z|.
+    """
+    df = df.copy()
+    if "close" not in df.columns:
+        return 1.0
+    returns = df['close'].pct_change().dropna()
+    S = returns.skew()      # Standardized skewness
+    K = returns.kurtosis() + 3  # Full kurtosis
+    z = norm.ppf(alpha)     # Standard normal quantile
+    z_cf = z + (z**2 - 1) * S / 6 + (z**3 - 3*z) * (K - 3) / 24 - (2*z**3 - 5*z) * (S**2) / 36
+    risk_factor = abs(z_cf / z) if z != 0 else 1.0
+    return risk_factor
+
+###########################################
+# EXPIRATION DATE HELPER FUNCTIONS
 ###########################################
 def get_valid_expiration_options(current_date=None):
     if current_date is None:
@@ -29,46 +91,24 @@ def get_valid_expiration_options(current_date=None):
 def compute_expiry_date(selected_day, current_date=None):
     if current_date is None:
         current_date = dt.datetime.now()
-    try:
-        if current_date.day < selected_day:
+    if current_date.day < selected_day:
+        try:
             expiry = current_date.replace(day=selected_day, hour=0, minute=0, second=0, microsecond=0)
-        else:
-            year = current_date.year + (current_date.month // 12)
-            month = (current_date.month % 12) + 1
+        except ValueError:
+            st.error("Invalid expiration date for current month.")
+            return None
+    else:
+        year = current_date.year + (current_date.month // 12)
+        month = (current_date.month % 12) + 1
+        try:
             expiry = dt.datetime(year, month, selected_day)
-    except ValueError as e:
-        st.error(f"Error computing expiry date: {e}")
-        return None
+        except ValueError:
+            st.error("Invalid expiration date for next month.")
+            return None
     return expiry
 
 ###########################################
-# Thalex API DETAILS AND GLOBAL SETTINGS
-###########################################
-BASE_URL = "https://thalex.com/api/v2/public"
-instruments_endpoint = "instruments"
-url_instruments = f"{BASE_URL}/{instruments_endpoint}"
-mark_price_endpoint = "mark_price_historical_data"
-url_mark_price = f"{BASE_URL}/{mark_price_endpoint}"
-TICKER_ENDPOINT = "ticker"
-URL_TICKER = f"{BASE_URL}/{TICKER_ENDPOINT}"
-
-def params(instrument_name):
-    now = dt.datetime.now()
-    start_dt = now - dt.timedelta(days=7)
-    return {
-        "from": int(start_dt.timestamp()),
-        "to": int(now.timestamp()),
-        "resolution": "5m",
-        "instrument_name": instrument_name,
-    }
-
-COLUMNS = [
-    "ts", "mark_price_open", "mark_price_high", "mark_price_low", "mark_price_close",
-    "iv_open", "iv_high", "iv_low", "iv_close"
-]
-
-###########################################
-# CREDENTIALS & LOGIN FUNCTIONS (USING TEXT FILES)
+# CREDENTIALS & LOGIN FUNCTIONS
 ###########################################
 def load_credentials():
     try:
@@ -79,7 +119,8 @@ def load_credentials():
         if len(usernames) != len(passwords):
             st.error("The number of usernames and passwords do not match.")
             return {}
-        return dict(zip(usernames, passwords))
+        creds = dict(zip(usernames, passwords))
+        return creds
     except Exception as e:
         st.error(f"Error loading credentials: {e}")
         return {}
@@ -96,7 +137,6 @@ def login():
             if username in creds and creds[username] == password:
                 st.session_state.logged_in = True
                 st.success("Logged in successfully! Click the login button a second time to open the app!")
-                st.experimental_rerun()
             else:
                 st.error("Invalid username or password")
         st.stop()
@@ -105,64 +145,61 @@ def login():
 # INSTRUMENTS FETCHING & FILTERING FUNCTIONS
 ###########################################
 def fetch_instruments():
-    try:
-        response = requests.get(url_instruments)
-        response.raise_for_status()
-        data = response.json()
-        return data.get("result", [])
-    except Exception as e:
-        st.error(f"Error fetching instruments: {e}")
-        return []
+    response = requests.get(url_instruments)
+    if response.status_code != 200:
+        raise Exception("Failed to fetch instruments")
+    data = response.json()
+    return data.get("result", [])
 
 def get_option_instruments(instruments, option_type, expiry_str):
-    filtered = [inst["instrument_name"] for inst in instruments 
-                if inst["instrument_name"].startswith(f"BTC-{expiry_str}") 
-                and inst["instrument_name"].endswith(f"-{option_type}")]
+    filtered = [
+        inst["instrument_name"] for inst in instruments
+        if inst["instrument_name"].startswith(f"BTC-{expiry_str}") and inst["instrument_name"].endswith(f"-{option_type}")
+    ]
     return sorted(filtered)
 
 def get_actual_iv(instrument_name):
-    try:
-        response = requests.get(url_mark_price, params=params(instrument_name))
-        response.raise_for_status()
-        data = response.json()
-        marks = get_in(["result", "mark"])(data)
-        if not marks:
-            return None
-        df = pd.DataFrame(marks, columns=COLUMNS)
-        df = df.sort_values("ts")
-        return df["iv_close"].iloc[-1]
-    except Exception as e:
-        st.error(f"Error fetching IV for {instrument_name}: {e}")
+    response = requests.get(url_mark_price, params=params(instrument_name))
+    if response.status_code != 200:
         return None
-
-def get_atm_iv(calls_all, spot_price):
-    try:
-        strike_list = [(inst, int(inst.split("-")[2])) for inst in calls_all]
-        strike_list.sort(key=lambda x: abs(x[1] - spot_price))
-        atm_instrument = strike_list[0][0]
-        atm_iv = get_actual_iv(atm_instrument)
-        return atm_iv
-    except Exception as e:
-        st.error(f"Error computing ATM IV: {e}")
+    data = response.json()
+    marks = get_in(["result", "mark"])(data)
+    if not marks:
         return None
+    df = pd.DataFrame(marks, columns=COLUMNS)
+    df = df.sort_values("ts")
+    return df["iv_close"].iloc[-1]
 
-def get_filtered_instruments(spot_price, expiry_str, t_years, multiplier=1):
+def get_filtered_instruments(spot_price, expiry_str=DEFAULT_EXPIRY_STR, t_years=T_YEARS, multiplier=1):
     instruments_list = fetch_instruments()
     calls_all = get_option_instruments(instruments_list, "C", expiry_str)
     puts_all = get_option_instruments(instruments_list, "P", expiry_str)
+    if not calls_all:
+        raise Exception(f"No call instruments found for expiry {expiry_str}.")
     
-    atm_iv = get_atm_iv(calls_all, spot_price)
-    if atm_iv is None:
-        raise Exception("ATM IV could not be determined")
+    strike_list = []
+    for inst in calls_all:
+        parts = inst.split("-")
+        if len(parts) >= 3 and parts[2].isdigit():
+            strike_list.append((inst, int(parts[2])))
+    if not strike_list:
+        raise Exception(f"No valid call instruments with strikes found for expiry {expiry_str}.")
+    strike_list.sort(key=lambda x: x[1])
+    strikes = [s for _, s in strike_list]
+    closest_index = min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot_price))
+    nearest_instrument = strike_list[closest_index][0]
+    actual_iv = get_actual_iv(nearest_instrument)
+    if actual_iv is None:
+        raise Exception("Could not fetch actual IV for the nearest instrument.")
     
-    lower_bound = spot_price * np.exp(-atm_iv * np.sqrt(t_years) * multiplier)
-    upper_bound = spot_price * np.exp(atm_iv * np.sqrt(t_years) * multiplier)
-    
+    lower_bound = spot_price * np.exp(-actual_iv * np.sqrt(t_years) * multiplier)
+    upper_bound = spot_price * np.exp(actual_iv * np.sqrt(t_years) * multiplier)
     filtered_calls = [inst for inst in calls_all if lower_bound <= int(inst.split("-")[2]) <= upper_bound]
     filtered_puts = [inst for inst in puts_all if lower_bound <= int(inst.split("-")[2]) <= upper_bound]
-    
     filtered_calls.sort(key=lambda x: int(x.split("-")[2]))
     filtered_puts.sort(key=lambda x: int(x.split("-")[2]))
+    if not filtered_calls and not filtered_puts:
+        raise Exception("No instruments left after applying the theoretical range filter.")
     return filtered_calls, filtered_puts
 
 ###########################################
@@ -171,84 +208,108 @@ def get_filtered_instruments(spot_price, expiry_str, t_years, multiplier=1):
 @st.cache_data(ttl=30)
 def fetch_data(instruments_tuple):
     instruments = list(instruments_tuple)
-    try:
-        df = (
-            pipe(
-                {name: requests.get(url_mark_price, params=params(name)) for name in instruments},
-                valmap(requests.Response.json),
-                valmap(get_in(["result", "mark"])),
-                valmap(curry(pd.DataFrame, columns=COLUMNS)),
-                valfilter(lambda df: not df.empty),
-                pd.concat,
-            )
-            .droplevel(1)
-            .reset_index(names=["instrument_name"])
-            .assign(date_time=lambda df: pd.to_datetime(df["ts"], unit="s")
-                    .dt.tz_localize("UTC")
-                    .dt.tz_convert("America/New_York"))
-            .assign(k=lambda df: df["instrument_name"].map(
-                lambda s: int(s.split("-")[2]) if len(s.split("-")) >= 3 and s.split("-")[2].isdigit() else np.nan))
-            .assign(option_type=lambda df: df["instrument_name"].str.split("-").str[-1])
+    df = (
+        pipe(
+            {name: requests.get(url_mark_price, params=params(name)) for name in instruments},
+            valmap(requests.Response.json),
+            valmap(get_in(["result", "mark"])),
+            valmap(curry(pd.DataFrame, columns=COLUMNS)),
+            valfilter(lambda df: not df.empty),
+            pd.concat,
         )
-    except Exception as e:
-        st.error(f"Error fetching data: {e}")
-        return pd.DataFrame()
+        .droplevel(1)
+        .reset_index(names=["instrument_name"])
+        .assign(date_time=lambda df: pd.to_datetime(df["ts"], unit="s")
+                .dt.tz_localize("UTC")
+                .dt.tz_convert("America/New_York"))
+        .assign(k=lambda df: df["instrument_name"].map(
+            lambda s: int(s.split("-")[2]) if len(s.split("-")) >= 3 and s.split("-")[2].isdigit() else np.nan))
+        .assign(option_type=lambda df: df["instrument_name"].str.split("-").str[-1])
+    )
     return df
 
 @st.cache_data(ttl=30)
 def fetch_ticker(instrument_name):
-    try:
-        params_dict = {"instrument_name": instrument_name}
-        response = requests.get(URL_TICKER, params=params_dict)
-        response.raise_for_status()
-        data = response.json()
-        return data.get("result", {})
-    except Exception as e:
-        st.error(f"Error fetching ticker for {instrument_name}: {e}")
-        return {}
+    params = {"instrument_name": instrument_name}
+    response = requests.get(URL_TICKER, params=params)
+    if response.status_code != 200:
+        return None
+    data = response.json()
+    return data.get("result", {})
 
+###########################################
+# UPDATED KRAKEN DATA FETCH (Dual Timeframe)
+###########################################
 def fetch_kraken_data():
-    try:
-        kraken = ccxt.kraken()
-        now_dt = dt.datetime.now()
-        start_dt = now_dt - dt.timedelta(days=365)
-        ohlcv_5m = kraken.fetch_ohlcv("BTC/USD", timeframe="5m",
-                                       since=int(start_dt.timestamp()) * 1000,
-                                       limit=3000)
-        ohlcv_1d = kraken.fetch_ohlcv("BTC/USD", timeframe="1d",
-                                       since=int(start_dt.timestamp()) * 1000)
-        df_5m = pd.DataFrame(ohlcv_5m, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df_5m["date_time"] = pd.to_datetime(df_5m["timestamp"], unit="ms")
-        df_5m = df_5m.set_index("date_time")
-        df_1d = pd.DataFrame(ohlcv_1d, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df_1d["date_time"] = pd.to_datetime(df_1d["timestamp"], unit="ms")
-        df_1d = df_1d.set_index("date_time")
-        full_df = pd.concat([df_5m, df_1d], axis=0).sort_index()
-        return full_df[~full_df.index.duplicated()]
-    except Exception as e:
-        st.error(f"Error fetching Kraken data: {e}")
-        return pd.DataFrame()
+    kraken = ccxt.kraken()
+    now_dt = dt.datetime.now()
+    start_dt = now_dt - dt.timedelta(days=365)
+    ohlcv_5m = kraken.fetch_ohlcv("BTC/USD", timeframe="5m",
+                                   since=int(start_dt.timestamp()) * 1000,
+                                   limit=3000)
+    ohlcv_1d = kraken.fetch_ohlcv("BTC/USD", timeframe="1d",
+                                   since=int(start_dt.timestamp()) * 1000)
+    df_5m = pd.DataFrame(ohlcv_5m, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df_5m["date_time"] = pd.to_datetime(df_5m["timestamp"], unit="ms")
+    df_5m = df_5m.set_index("date_time")
+    df_1d = pd.DataFrame(ohlcv_1d, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df_1d["date_time"] = pd.to_datetime(df_1d["timestamp"], unit="ms")
+    df_1d = df_1d.set_index("date_time")
+    full_df = pd.concat([df_5m, df_1d], axis=0).sort_index()
+    return full_df[~full_df.index.duplicated()]
 
 ###########################################
-# REALIZED VOLATILITY CALCULATION FUNCTIONS (30-day)
+# EWMA-ROGER SATCHELL VOLATILITY CALCULATION
+###########################################
+def calculate_ewma_roger_satchell_volatility(price_data, span=days_to_expiry):
+    """
+    Calculate realized volatility using the Roger-Satchell estimator with an EWMA.
+    Assumes price_data has columns: 'open', 'high', 'low', 'close'.
+    """
+    df = price_data.copy()
+    df['rs'] = (np.log(df['high'] / df['close']) * np.log(df['high'] / df['open']) +
+                np.log(df['low'] / df['close']) * np.log(df['low'] / df['open']))
+    ewma_rs = df['rs'].ewm(span=span, adjust=False).mean()
+    volatility = np.sqrt(ewma_rs.clip(lower=0))
+    return volatility
+
+def compute_realized_volatility_5min(df, annualize_days=365):
+    """
+    Compute realized volatility using 5-minute data with the Roger-Satchell estimator.
+    Annualizes based on the number of 5-minute intervals in a year.
+    """
+    df = df.copy()
+    df['rs'] = (np.log(df['high'] / df['close']) * np.log(df['high'] / df['open']) +
+                np.log(df['low'] / df['close']) * np.log(df['low'] / df['open']))
+    total_variance = df['rs'].sum()
+    if total_variance <= 0:
+        return 0.0
+    N = len(df)
+    if N == 0:
+        return 0.0
+    M = annualize_days * 24 * 12  # 12 intervals per hour
+    annualization_factor = np.sqrt(M / N)
+    realized_vol = np.sqrt(total_variance) * annualization_factor
+    return realized_vol
+
+###########################################
+# BTC DAILY ANNUALIZED REALIZED VOLATILITY CALCULATION
 ###########################################
 def calculate_btc_annualized_volatility_daily(df):
     """
-    Calculates the annualized realized volatility of BTC using the last 30 days
-    of daily percentage returns.
-    If a "close" column is missing, it renames "mark_price_close" to "close".
+    Calculates the annualized realized volatility of BTC using the last 30 days of daily percentage returns.
+    If "close" is missing, it renames "mark_price_close" to "close".
     """
     if "date_time" not in df.columns:
         if isinstance(df.index, pd.DatetimeIndex):
             df = df.reset_index()
         else:
             raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
-    # Ensure a "close" column exists
     if "close" not in df.columns:
         if "mark_price_close" in df.columns:
             df = df.rename(columns={"mark_price_close": "close"})
         else:
-            raise KeyError("No 'close' or 'mark_price_close' column found in DataFrame.")
+            raise KeyError("No 'close' column found in DataFrame.")
     df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
     df_daily["daily_return"] = df_daily["close"].pct_change()
     last_30_returns = df_daily["daily_return"].dropna().tail(30)
@@ -260,9 +321,7 @@ def calculate_btc_annualized_volatility_daily(df):
 
 def calculate_daily_realized_volatility_series(df):
     """
-    Calculates a daily series of realized volatility using the daily percentage returns
-    over a 30-day rolling window.
-    Renames "mark_price_close" to "close" if needed.
+    Calculates a daily series of realized volatility using the daily percentage returns over a 30-day rolling window.
     """
     if "date_time" not in df.columns:
         if isinstance(df.index, pd.DatetimeIndex):
@@ -273,7 +332,7 @@ def calculate_daily_realized_volatility_series(df):
         if "mark_price_close" in df.columns:
             df = df.rename(columns={"mark_price_close": "close"})
         else:
-            raise KeyError("No 'close' or 'mark_price_close' column found in DataFrame.")
+            raise KeyError("No 'close' column found in DataFrame.")
     df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
     df_daily["daily_return"] = df_daily["close"].pct_change()
     volatility_series = df_daily["daily_return"].rolling(window=30).std() * np.sqrt(365)
@@ -294,7 +353,7 @@ def compute_delta(row, S):
         T = 0.0001
     K = row["k"]
     sigma = row["iv_close"]
-    sigma_eff = sigma
+    sigma_eff = sigma * risk_factor if 'risk_factor' in globals() else sigma
     try:
         d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
     except Exception:
@@ -313,7 +372,7 @@ def compute_gamma(row, S):
         return np.nan
     K = row["k"]
     sigma = row["iv_close"]
-    sigma_eff = sigma
+    sigma_eff = sigma * risk_factor if 'risk_factor' in globals() else sigma
     try:
         d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
     except Exception:
@@ -507,7 +566,7 @@ def compute_delta(row, S):
         T = 0.0001
     K = row["k"]
     sigma = row["iv_close"]
-    sigma_eff = sigma
+    sigma_eff = sigma * risk_factor if 'risk_factor' in globals() else sigma
     try:
         d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
     except Exception:
@@ -526,7 +585,7 @@ def compute_gamma(row, S):
         return np.nan
     K = row["k"]
     sigma = row["iv_close"]
-    sigma_eff = sigma
+    sigma_eff = sigma * risk_factor if 'risk_factor' in globals() else sigma
     try:
         d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
     except Exception:
@@ -720,7 +779,7 @@ def compute_delta(row, S):
         T = 0.0001
     K = row["k"]
     sigma = row["iv_close"]
-    sigma_eff = sigma
+    sigma_eff = sigma * risk_factor if 'risk_factor' in globals() else sigma
     try:
         d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
     except Exception:
@@ -739,646 +798,7 @@ def compute_gamma(row, S):
         return np.nan
     K = row["k"]
     sigma = row["iv_close"]
-    sigma_eff = sigma
-    try:
-        d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
-    except Exception:
-        return np.nan
-    gamma = norm.pdf(d1) / (S * sigma_eff * np.sqrt(T))
-    return gamma
-
-def compute_gex(row, S, oi):
-    gamma = compute_gamma(row, S)
-    if gamma is None or np.isnan(gamma):
-        return np.nan
-    return gamma * oi * (S ** 2)
-
-###########################################
-# REALIZED VOLATILITY - EV CALCULATION FUNCTIONS
-###########################################
-def compute_ev(iv, rv, T, position_side="short"):
-    try:
-        if position_side.lower() == "short":
-            ev = (((iv**2 - rv**2) * T) / 2) * 100
-        elif position_side.lower() == "long":
-            ev = (((rv**2 - iv**2) * T) / 2) * 100
-        else:
-            ev = (((iv**2 - rv**2) * T) / 2) * 100
-    except Exception as e:
-        st.error(f"Error computing EV: {e}")
-        ev = np.nan
-    return ev
-
-###########################################
-# NORMALIZATION FOR COMPOSITE SCORE
-###########################################
-def normalize_metrics(metrics):
-    arr = np.array(metrics)
-    if len(arr) <= 1 or np.std(arr) == 0:
-        return arr
-    return (arr - np.mean(arr)) / np.std(arr)
-
-###########################################
-# SELECT OPTIMAL STRIKE - ADAPTIVE FOR SHORT vs LONG VOL
-###########################################
-def select_optimal_strike(ticker_list, position_side='short'):
-    if not ticker_list:
-        return None
-    if position_side.lower() == 'short':
-        weights = {"ev": 0.5, "gamma": -0.3, "oi": 0.2}
-    else:
-        weights = {"ev": 0.5, "gamma": 0.3, "oi": 0.2}
-    ev_list = [item['EV'] for item in ticker_list]
-    gamma_list = [item['gamma'] for item in ticker_list]
-    oi_list = [item['open_interest'] for item in ticker_list]
-    norm_ev = normalize_metrics(ev_list)
-    norm_gamma = normalize_metrics(gamma_list)
-    norm_oi = normalize_metrics(oi_list)
-    best_score = -np.inf
-    best_candidate = None
-    for i, item in enumerate(ticker_list):
-        score = (weights["ev"] * norm_ev[i] +
-                 weights["gamma"] * norm_gamma[i] +
-                 weights["oi"] * norm_oi[i])
-        item["composite_score"] = score
-        if score > best_score:
-            best_score = score
-            best_candidate = item
-    return best_candidate
-
-###########################################
-# COMPOSITE SCORE VISUALIZATION (RAW)
-###########################################
-def compute_composite_score(item, position_side='short'):
-    score = item['EV']
-    if item.get('gamma', 0) > 0:
-        if position_side.lower() == "short":
-            score /= item['gamma']
-        else:
-            score *= item['gamma']
-    score += 0.01 * item['open_interest']
-    return score
-
-###########################################
-# VOLATILITY SURFACE ANALYSIS
-###########################################
-def plot_volatility_surface(df, spot_price):
-    df = df.copy()
-    df['moneyness'] = df['k'] / spot_price
-    df['T'] = (df['date_time'].max() - df['date_time']).dt.days / 365.0
-    fig = px.scatter_3d(df, x='moneyness', y='T', z='iv_close',
-                        color='option_type', title="Volatility Surface")
-    st.plotly_chart(fig)
-
-###########################################
-# TRANSACTION COST ADJUSTMENT
-###########################################
-def adjust_for_liquidity(ticker_list):
-    for item in ticker_list:
-        bid = item.get('bid', 0)
-        ask = item.get('ask', 0)
-        if bid and ask:
-            spread = ask - bid
-            mid = (ask + bid) / 2
-            if mid > 0:
-                item['EV'] *= (1 - spread / mid)
-    return ticker_list
-
-###########################################
-# HISTORICAL BACKTESTING FOR OPTIMAL WEIGHTS
-###########################################
-def load_previous_trades():
-    return pd.DataFrame({
-        'EV': np.random.normal(0, 1, 100),
-        'gamma': np.random.normal(0, 1, 100),
-        'oi': np.random.normal(0, 1, 100),
-        'profit': np.random.normal(0, 1, 100)
-    })
-
-def optimize_weights(historical_data, target='profit', features=['EV', 'gamma', 'oi']):
-    X = historical_data[features]
-    y = historical_data[target]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = LinearRegression()
-    model.fit(X_train, y_train)
-    return model.coef_
-
-def recommend_volatility_strategy(atm_iv, rv):
-    if atm_iv > rv:
-        return "short"
-    elif atm_iv < rv:
-        return "long"
-    else:
-        return "neutral"
-
-###########################################
-# MAIN DAILY REALIZED VOLATILITY FUNCTIONS (30-day)
-###########################################
-def calculate_btc_annualized_volatility_daily(df):
-    """
-    Calculates the annualized realized volatility of BTC using the last 30 days
-    of daily percentage returns.
-    """
-    if "date_time" not in df.columns:
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df.reset_index()
-        else:
-            raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
-    if "close" not in df.columns:
-        if "mark_price_close" in df.columns:
-            df = df.rename(columns={"mark_price_close": "close"})
-        else:
-            raise KeyError("No 'close' column found in DataFrame.")
-    df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
-    df_daily["daily_return"] = df_daily["close"].pct_change()
-    last_30_returns = df_daily["daily_return"].dropna().tail(30)
-    if last_30_returns.empty:
-        return np.nan
-    daily_std = last_30_returns.std()
-    annualized_vol = daily_std * np.sqrt(365)
-    return annualized_vol
-
-def calculate_daily_realized_volatility_series(df):
-    """
-    Calculates a daily series of realized volatility using the daily percentage returns
-    over a 30-day rolling window.
-    """
-    if "date_time" not in df.columns:
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df.reset_index()
-        else:
-            raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
-    if "close" not in df.columns:
-        if "mark_price_close" in df.columns:
-            df = df.rename(columns={"mark_price_close": "close"})
-        else:
-            raise KeyError("No 'close' column found in DataFrame.")
-    df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
-    df_daily["daily_return"] = df_daily["close"].pct_change()
-    volatility_series = df_daily["daily_return"].rolling(window=30).std() * np.sqrt(365)
-    return volatility_series.dropna()
-
-###########################################
-# OPTION DELTA, GAMMA, AND GEX CALCULATION FUNCTIONS
-###########################################
-def compute_delta(row, S):
-    try:
-        expiry_str = row["instrument_name"].split("-")[1]
-        expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
-        expiry_date = expiry_date.replace(tzinfo=row["date_time"].tzinfo)
-    except Exception:
-        return np.nan
-    T = (expiry_date - row["date_time"]).total_seconds() / (365.25 * 86400)
-    if T <= 0:
-        T = 0.0001
-    K = row["k"]
-    sigma = row["iv_close"]
-    sigma_eff = sigma
-    try:
-        d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
-    except Exception:
-        return np.nan
-    return norm.cdf(d1) if row["option_type"] == "C" else norm.cdf(d1) - 1
-
-def compute_gamma(row, S):
-    try:
-        expiry_str = row["instrument_name"].split("-")[1]
-        expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
-        expiry_date = expiry_date.replace(tzinfo=row["date_time"].tzinfo)
-    except Exception:
-        return np.nan
-    T = (expiry_date - row["date_time"]).total_seconds() / (365 * 24 * 3600)
-    if T <= 0:
-        return np.nan
-    K = row["k"]
-    sigma = row["iv_close"]
-    sigma_eff = sigma
-    try:
-        d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
-    except Exception:
-        return np.nan
-    gamma = norm.pdf(d1) / (S * sigma_eff * np.sqrt(T))
-    return gamma
-
-def compute_gex(row, S, oi):
-    gamma = compute_gamma(row, S)
-    if gamma is None or np.isnan(gamma):
-        return np.nan
-    return gamma * oi * (S ** 2)
-
-###########################################
-# REALIZED VOLATILITY - EV CALCULATION FUNCTIONS
-###########################################
-def compute_ev(iv, rv, T, position_side="short"):
-    try:
-        if position_side.lower() == "short":
-            ev = (((iv**2 - rv**2) * T) / 2) * 100
-        elif position_side.lower() == "long":
-            ev = (((rv**2 - iv**2) * T) / 2) * 100
-        else:
-            ev = (((iv**2 - rv**2) * T) / 2) * 100
-    except Exception as e:
-        st.error(f"Error computing EV: {e}")
-        ev = np.nan
-    return ev
-
-###########################################
-# NORMALIZATION FOR COMPOSITE SCORE
-###########################################
-def normalize_metrics(metrics):
-    arr = np.array(metrics)
-    if len(arr) <= 1 or np.std(arr) == 0:
-        return arr
-    return (arr - np.mean(arr)) / np.std(arr)
-
-###########################################
-# SELECT OPTIMAL STRIKE - ADAPTIVE FOR SHORT vs LONG VOL
-###########################################
-def select_optimal_strike(ticker_list, position_side='short'):
-    if not ticker_list:
-        return None
-    if position_side.lower() == 'short':
-        weights = {"ev": 0.5, "gamma": -0.3, "oi": 0.2}
-    else:
-        weights = {"ev": 0.5, "gamma": 0.3, "oi": 0.2}
-    ev_list = [item['EV'] for item in ticker_list]
-    gamma_list = [item['gamma'] for item in ticker_list]
-    oi_list = [item['open_interest'] for item in ticker_list]
-    norm_ev = normalize_metrics(ev_list)
-    norm_gamma = normalize_metrics(gamma_list)
-    norm_oi = normalize_metrics(oi_list)
-    best_score = -np.inf
-    best_candidate = None
-    for i, item in enumerate(ticker_list):
-        score = (weights["ev"] * norm_ev[i] +
-                 weights["gamma"] * norm_gamma[i] +
-                 weights["oi"] * norm_oi[i])
-        item["composite_score"] = score
-        if score > best_score:
-            best_score = score
-            best_candidate = item
-    return best_candidate
-
-###########################################
-# COMPOSITE SCORE VISUALIZATION (RAW)
-###########################################
-def compute_composite_score(item, position_side='short'):
-    score = item['EV']
-    if item.get('gamma', 0) > 0:
-        if position_side.lower() == "short":
-            score /= item['gamma']
-        else:
-            score *= item['gamma']
-    score += 0.01 * item['open_interest']
-    return score
-
-###########################################
-# VOLATILITY SURFACE ANALYSIS
-###########################################
-def plot_volatility_surface(df, spot_price):
-    df = df.copy()
-    df['moneyness'] = df['k'] / spot_price
-    df['T'] = (df['date_time'].max() - df['date_time']).dt.days / 365.0
-    fig = px.scatter_3d(df, x='moneyness', y='T', z='iv_close',
-                        color='option_type', title="Volatility Surface")
-    st.plotly_chart(fig)
-
-###########################################
-# TRANSACTION COST ADJUSTMENT
-###########################################
-def adjust_for_liquidity(ticker_list):
-    for item in ticker_list:
-        bid = item.get('bid', 0)
-        ask = item.get('ask', 0)
-        if bid and ask:
-            spread = ask - bid
-            mid = (ask + bid) / 2
-            if mid > 0:
-                item['EV'] *= (1 - spread / mid)
-    return ticker_list
-
-###########################################
-# HISTORICAL BACKTESTING FOR OPTIMAL WEIGHTS
-###########################################
-def load_previous_trades():
-    return pd.DataFrame({
-        'EV': np.random.normal(0, 1, 100),
-        'gamma': np.random.normal(0, 1, 100),
-        'oi': np.random.normal(0, 1, 100),
-        'profit': np.random.normal(0, 1, 100)
-    })
-
-def optimize_weights(historical_data, target='profit', features=['EV', 'gamma', 'oi']):
-    X = historical_data[features]
-    y = historical_data[target]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = LinearRegression()
-    model.fit(X_train, y_train)
-    return model.coef_
-
-def recommend_volatility_strategy(atm_iv, rv):
-    if atm_iv > rv:
-        return "short"
-    elif atm_iv < rv:
-        return "long"
-    else:
-        return "neutral"
-
-###########################################
-# MAIN DAILY REALIZED VOLATILITY FUNCTIONS (30-day)
-###########################################
-def calculate_btc_annualized_volatility_daily(df):
-    """
-    Calculates the annualized realized volatility of BTC using the last 30 days
-    of daily percentage returns.
-    """
-    if "date_time" not in df.columns:
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df.reset_index()
-        else:
-            raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
-    if "close" not in df.columns:
-        if "mark_price_close" in df.columns:
-            df = df.rename(columns={"mark_price_close": "close"})
-        else:
-            raise KeyError("No 'close' column found in DataFrame.")
-    df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
-    df_daily["daily_return"] = df_daily["close"].pct_change()
-    last_30_returns = df_daily["daily_return"].dropna().tail(30)
-    if last_30_returns.empty:
-        return np.nan
-    daily_std = last_30_returns.std()
-    annualized_vol = daily_std * np.sqrt(365)
-    return annualized_vol
-
-def calculate_daily_realized_volatility_series(df):
-    """
-    Calculates a daily series of realized volatility using the daily percentage returns
-    over a 30-day rolling window.
-    """
-    if "date_time" not in df.columns:
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df.reset_index()
-        else:
-            raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
-    if "close" not in df.columns:
-        if "mark_price_close" in df.columns:
-            df = df.rename(columns={"mark_price_close": "close"})
-        else:
-            raise KeyError("No 'close' column found in DataFrame.")
-    df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
-    df_daily["daily_return"] = df_daily["close"].pct_change()
-    volatility_series = df_daily["daily_return"].rolling(window=30).std() * np.sqrt(365)
-    return volatility_series.dropna()
-
-###########################################
-# OPTION DELTA, GAMMA, AND GEX CALCULATION FUNCTIONS
-###########################################
-def compute_delta(row, S):
-    try:
-        expiry_str = row["instrument_name"].split("-")[1]
-        expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
-        expiry_date = expiry_date.replace(tzinfo=row["date_time"].tzinfo)
-    except Exception:
-        return np.nan
-    T = (expiry_date - row["date_time"]).total_seconds() / (365.25 * 86400)
-    if T <= 0:
-        T = 0.0001
-    K = row["k"]
-    sigma = row["iv_close"]
-    sigma_eff = sigma
-    try:
-        d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
-    except Exception:
-        return np.nan
-    return norm.cdf(d1) if row["option_type"] == "C" else norm.cdf(d1) - 1
-
-def compute_gamma(row, S):
-    try:
-        expiry_str = row["instrument_name"].split("-")[1]
-        expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
-        expiry_date = expiry_date.replace(tzinfo=row["date_time"].tzinfo)
-    except Exception:
-        return np.nan
-    T = (expiry_date - row["date_time"]).total_seconds() / (365 * 24 * 3600)
-    if T <= 0:
-        return np.nan
-    K = row["k"]
-    sigma = row["iv_close"]
-    sigma_eff = sigma
-    try:
-        d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
-    except Exception:
-        return np.nan
-    gamma = norm.pdf(d1) / (S * sigma_eff * np.sqrt(T))
-    return gamma
-
-def compute_gex(row, S, oi):
-    gamma = compute_gamma(row, S)
-    if gamma is None or np.isnan(gamma):
-        return np.nan
-    return gamma * oi * (S ** 2)
-
-###########################################
-# REALIZED VOLATILITY - EV CALCULATION FUNCTIONS
-###########################################
-def compute_ev(iv, rv, T, position_side="short"):
-    try:
-        if position_side.lower() == "short":
-            ev = (((iv**2 - rv**2) * T) / 2) * 100
-        elif position_side.lower() == "long":
-            ev = (((rv**2 - iv**2) * T) / 2) * 100
-        else:
-            ev = (((iv**2 - rv**2) * T) / 2) * 100
-    except Exception as e:
-        st.error(f"Error computing EV: {e}")
-        ev = np.nan
-    return ev
-
-###########################################
-# NORMALIZATION FOR COMPOSITE SCORE
-###########################################
-def normalize_metrics(metrics):
-    arr = np.array(metrics)
-    if len(arr) <= 1 or np.std(arr) == 0:
-        return arr
-    return (arr - np.mean(arr)) / np.std(arr)
-
-###########################################
-# SELECT OPTIMAL STRIKE - ADAPTIVE FOR SHORT vs LONG VOL
-###########################################
-def select_optimal_strike(ticker_list, position_side='short'):
-    if not ticker_list:
-        return None
-    if position_side.lower() == 'short':
-        weights = {"ev": 0.5, "gamma": -0.3, "oi": 0.2}
-    else:
-        weights = {"ev": 0.5, "gamma": 0.3, "oi": 0.2}
-    ev_list = [item['EV'] for item in ticker_list]
-    gamma_list = [item['gamma'] for item in ticker_list]
-    oi_list = [item['open_interest'] for item in ticker_list]
-    norm_ev = normalize_metrics(ev_list)
-    norm_gamma = normalize_metrics(gamma_list)
-    norm_oi = normalize_metrics(oi_list)
-    best_score = -np.inf
-    best_candidate = None
-    for i, item in enumerate(ticker_list):
-        score = (weights["ev"] * norm_ev[i] +
-                 weights["gamma"] * norm_gamma[i] +
-                 weights["oi"] * norm_oi[i])
-        item["composite_score"] = score
-        if score > best_score:
-            best_score = score
-            best_candidate = item
-    return best_candidate
-
-###########################################
-# COMPOSITE SCORE VISUALIZATION (RAW)
-###########################################
-def compute_composite_score(item, position_side='short'):
-    score = item['EV']
-    if item.get('gamma', 0) > 0:
-        if position_side.lower() == "short":
-            score /= item['gamma']
-        else:
-            score *= item['gamma']
-    score += 0.01 * item['open_interest']
-    return score
-
-###########################################
-# VOLATILITY SURFACE ANALYSIS
-###########################################
-def plot_volatility_surface(df, spot_price):
-    df = df.copy()
-    df['moneyness'] = df['k'] / spot_price
-    df['T'] = (df['date_time'].max() - df['date_time']).dt.days / 365.0
-    fig = px.scatter_3d(df, x='moneyness', y='T', z='iv_close',
-                        color='option_type', title="Volatility Surface")
-    st.plotly_chart(fig)
-
-###########################################
-# TRANSACTION COST ADJUSTMENT
-###########################################
-def adjust_for_liquidity(ticker_list):
-    for item in ticker_list:
-        bid = item.get('bid', 0)
-        ask = item.get('ask', 0)
-        if bid and ask:
-            spread = ask - bid
-            mid = (ask + bid) / 2
-            if mid > 0:
-                item['EV'] *= (1 - spread / mid)
-    return ticker_list
-
-###########################################
-# HISTORICAL BACKTESTING FOR OPTIMAL WEIGHTS
-###########################################
-def load_previous_trades():
-    return pd.DataFrame({
-        'EV': np.random.normal(0, 1, 100),
-        'gamma': np.random.normal(0, 1, 100),
-        'oi': np.random.normal(0, 1, 100),
-        'profit': np.random.normal(0, 1, 100)
-    })
-
-def optimize_weights(historical_data, target='profit', features=['EV', 'gamma', 'oi']):
-    X = historical_data[features]
-    y = historical_data[target]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = LinearRegression()
-    model.fit(X_train, y_train)
-    return model.coef_
-
-def recommend_volatility_strategy(atm_iv, rv):
-    if atm_iv > rv:
-        return "short"
-    elif atm_iv < rv:
-        return "long"
-    else:
-        return "neutral"
-
-###########################################
-# MAIN DAILY REALIZED VOLATILITY FUNCTIONS (30-day)
-###########################################
-def calculate_btc_annualized_volatility_daily(df):
-    """
-    Calculates the annualized realized volatility of BTC using the last 30 days
-    of daily percentage returns.
-    """
-    if "date_time" not in df.columns:
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df.reset_index()
-        else:
-            raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
-    if "close" not in df.columns:
-        if "mark_price_close" in df.columns:
-            df = df.rename(columns={"mark_price_close": "close"})
-        else:
-            raise KeyError("No 'close' column found in DataFrame.")
-    df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
-    df_daily["daily_return"] = df_daily["close"].pct_change()
-    last_30_returns = df_daily["daily_return"].dropna().tail(30)
-    if last_30_returns.empty:
-        return np.nan
-    daily_std = last_30_returns.std()
-    annualized_vol = daily_std * np.sqrt(365)
-    return annualized_vol
-
-def calculate_daily_realized_volatility_series(df):
-    """
-    Calculates a daily series of realized volatility using the daily percentage returns
-    over a 30-day rolling window.
-    """
-    if "date_time" not in df.columns:
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df.reset_index()
-        else:
-            raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
-    if "close" not in df.columns:
-        if "mark_price_close" in df.columns:
-            df = df.rename(columns={"mark_price_close": "close"})
-        else:
-            raise KeyError("No 'close' column found in DataFrame.")
-    df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
-    df_daily["daily_return"] = df_daily["close"].pct_change()
-    volatility_series = df_daily["daily_return"].rolling(window=30).std() * np.sqrt(365)
-    return volatility_series.dropna()
-
-###########################################
-# OPTION DELTA, GAMMA, AND GEX CALCULATION FUNCTIONS
-###########################################
-def compute_delta(row, S):
-    try:
-        expiry_str = row["instrument_name"].split("-")[1]
-        expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
-        expiry_date = expiry_date.replace(tzinfo=row["date_time"].tzinfo)
-    except Exception:
-        return np.nan
-    T = (expiry_date - row["date_time"]).total_seconds() / (365.25 * 86400)
-    if T <= 0:
-        T = 0.0001
-    K = row["k"]
-    sigma = row["iv_close"]
-    sigma_eff = sigma
-    try:
-        d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
-    except Exception:
-        return np.nan
-    return norm.cdf(d1) if row["option_type"] == "C" else norm.cdf(d1) - 1
-
-def compute_gamma(row, S):
-    try:
-        expiry_str = row["instrument_name"].split("-")[1]
-        expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
-        expiry_date = expiry_date.replace(tzinfo=row["date_time"].tzinfo)
-    except Exception:
-        return np.nan
-    T = (expiry_date - row["date_time"]).total_seconds() / (365 * 24 * 3600)
-    if T <= 0:
-        return np.nan
-    K = row["k"]
-    sigma = row["iv_close"]
-    sigma_eff = sigma
+    sigma_eff = sigma * risk_factor if 'risk_factor' in globals() else sigma
     try:
         d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
     except Exception:
@@ -1548,13 +968,13 @@ def main():
     spot_price = df_kraken["close"].iloc[-1]
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
     
-    # Pass the original df_kraken to the volatility function (it will be resampled internally)
+    # Pass the original df_kraken to the volatility function (which handles renaming if needed)
     rv = calculate_btc_annualized_volatility_daily(df_kraken)
     st.write(f"Computed Realized Volatility (annualized, 30-day): {rv:.4f}")
     
     instruments_list = fetch_instruments()
     calls_all = get_option_instruments(instruments_list, "C", expiry_str)
-    atm_iv = get_atm_iv(calls_all, spot_price)
+    atm_iv = get_actual_iv(calls_all[0]) if calls_all else None
     if atm_iv is None:
         st.error("Could not compute ATM IV.")
         return
@@ -1621,7 +1041,6 @@ def main():
             "open_interest": ticker_data["open_interest"],
             "iv": raw_iv
         })
-    # Inline definitions for smile and ticker list builders:
     def build_smile_df(ticker_list):
         df = pd.DataFrame(ticker_list)
         df = df.dropna(subset=["iv"])
@@ -1659,6 +1078,14 @@ def main():
     smile_df = build_smile_df(preliminary_ticker_list)
     global ticker_list
     ticker_list = build_ticker_list(all_instruments, spot_price, T_YEARS, smile_df)
+    
+    # --- Add composite score to each ticker ---
+    for item in ticker_list:
+        item["score"] = compute_composite_score(item, position_side)
+    
+    # Optionally, display the ticker list with the computed composite score
+    st.subheader("Ticker List with Composite Score")
+    st.dataframe(pd.DataFrame(ticker_list))
     
     daily_rv_series = calculate_daily_realized_volatility_series(df_kraken)
     daily_rv = daily_rv_series.tolist()
