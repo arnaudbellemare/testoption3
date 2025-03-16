@@ -7,10 +7,11 @@ import ccxt
 from toolz.curried import *
 import plotly.express as px
 import plotly.graph_objects as go
-from scipy.stats import norm
+from scipy.stats import norm, percentileofscore
 import math
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
+from scipy.interpolate import CubicSpline
 
 ###########################################
 # EXPIRATION DATE SELECTION FUNCTIONS
@@ -117,7 +118,7 @@ def login():
             creds = load_credentials()
             if username in creds and creds[username] == password:
                 st.session_state.logged_in = True
-                st.success("Logged in successfully!")
+                st.success("Logged in successfully! Click the login button a second time to open the app!")
                 st.experimental_rerun()
             else:
                 st.error("Invalid username or password")
@@ -142,7 +143,7 @@ def fetch_instruments():
 def get_option_instruments(instruments, option_type, expiry_str):
     """
     Filter instruments by option type (C or P) and expiry.
-    Example instrument: BTC-28MAR25-40000-C.
+    Example: BTC-28MAR25-40000-C.
     """
     filtered = [inst["instrument_name"] for inst in instruments 
                 if inst["instrument_name"].startswith(f"BTC-{expiry_str}") 
@@ -276,7 +277,21 @@ def fetch_kraken_data():
     return df_kraken
 
 ###########################################
-# EWMA ROGER-SATCHELL VOLATILITY FUNCTIONS
+# VOLATILITY CALCULATION FUNCTION (5-minute data)
+###########################################
+def compute_30day_volatility(prices, annualize_days=365):
+    """
+    Compute annualized volatility based on the standard deviation of daily
+    percentage changes over the last 30 days.
+    'prices' is expected to be a pandas Series of daily closing prices.
+    """
+    returns = prices.pct_change().dropna().tail(30)
+    daily_std = returns.std()
+    annualized_vol = daily_std * np.sqrt(annualize_days)
+    return annualized_vol
+
+###########################################
+# EWMA ROGER-SATCHELL VOLATILITY FUNCTIONS (for reference)
 ###########################################
 def calculate_ewma_roger_satchell_volatility(price_data, span=30):
     """
@@ -290,27 +305,29 @@ def calculate_ewma_roger_satchell_volatility(price_data, span=30):
     volatility = np.sqrt(ewma_rs.clip(lower=0))
     return volatility
 
-def compute_realized_volatility_5min(df, annualize_days=365):
+def compute_daily_realized_volatility(df, span=30, annualize_days=365):
     """
-    Compute realized volatility using 5-minute data with the Roger-Satchell estimator.
-    Annualizes based on the number of 5-minute intervals in a year.
+    Resample the underlying data daily using OHLC aggregation, compute the
+    EWMA Roger-Satchell volatility, annualize it, and return the last value as a scalar.
+    (This function is provided for reference and is not used in the main volatility calculation.)
     """
-    df = df.copy()
-    # Calculate RS for each 5-minute interval
-    df['rs'] = (np.log(df['high'] / df['close']) * np.log(df['high'] / df['open']) +
-                np.log(df['low'] / df['close']) * np.log(df['low'] / df['open']))
-    total_variance = df['rs'].sum()
-    if total_variance <= 0:
-        return 0.0
-    # Number of 5-minute intervals in the data
-    N = len(df)
-    if N == 0:
-        return 0.0
-    # Number of 5-minute intervals in a year
-    M = annualize_days * 24 * 12  # 12 intervals per hour
-    annualization_factor = np.sqrt(M / N)
-    realized_vol = np.sqrt(total_variance) * annualization_factor
-    return realized_vol
+    if 'date_time' in df.columns:
+        df_daily = df.resample('D', on='date_time').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last'
+        }).dropna()
+    else:
+        df_daily = df.resample('D').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last'
+        }).dropna()
+    daily_vol = calculate_ewma_roger_satchell_volatility(df_daily, span=span)
+    daily_vol_annualized = daily_vol * np.sqrt(annualize_days)
+    return daily_vol_annualized.iloc[-1]
 
 ###########################################
 # OPTION DELTA, GAMMA, AND GEX CALCULATION FUNCTIONS
@@ -330,8 +347,7 @@ def compute_delta(row, S):
         T = 0.0001
     K = row["k"]
     sigma = row["iv_close"]
-    # Optionally adjust sigma using a risk factor if available
-    sigma_eff = sigma
+    sigma_eff = sigma  # You can adjust sigma here if needed
     try:
         d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
     except Exception:
@@ -353,7 +369,7 @@ def compute_gamma(row, S):
         return np.nan
     K = row["k"]
     sigma = row["iv_close"]
-    sigma_eff = sigma
+    sigma_eff = sigma  # Adjust if needed
     try:
         d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
     except Exception:
@@ -532,6 +548,26 @@ def recommend_volatility_strategy(atm_iv, rv):
         return "neutral"
 
 ###########################################
+# NEW: COMPUTE 30-DAY REALIZED VOLATILITY FROM DAILY PRICES
+###########################################
+def compute_30day_volatility(prices, annualize_days=365):
+    """
+    Compute annualized volatility based on the standard deviation of daily percentage
+    changes over the last 30 days.
+    
+    Parameters:
+      prices (pd.Series): Daily closing prices of BTC.
+      annualize_days (int): Number of days used for annualization (365 for BTC).
+    
+    Returns:
+      float: Annualized volatility.
+    """
+    returns = prices.pct_change().dropna().tail(30)
+    daily_std = returns.std()
+    annualized_vol = daily_std * np.sqrt(annualize_days)
+    return annualized_vol
+
+###########################################
 # MAIN DASHBOARD FUNCTION
 ###########################################
 def main():
@@ -563,9 +599,11 @@ def main():
     spot_price = df_kraken["close"].iloc[-1]
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
     
-    # Compute Realized Volatility using 5-minute data (EWMA Roger-Satchell method)
-    rv = compute_realized_volatility_5min(df_kraken, annualize_days=365)
-    st.write(f"Computed Realized Volatility (annualized): {rv:.4f}")
+    # Compute Realized Volatility using 30-day daily returns
+    # Resample df_kraken to daily frequency by taking the last close value
+    df_daily = df_kraken.resample('D', on='date_time').last()
+    rv = compute_30day_volatility(df_daily['close'], annualize_days=365)
+    st.write(f"Computed Realized Volatility (annualized, 30-day): {rv:.4f}")
     
     # Fetch instruments and compute ATM IV for strategy recommendation
     instruments_list = fetch_instruments()
@@ -745,6 +783,28 @@ def adjust_for_liquidity(ticker_list):
                 item['EV'] *= (1 - spread / mid)
     return ticker_list
 
+def load_previous_trades():
+    """
+    Load historical trade data for backtesting.
+    For demonstration, returns a dummy DataFrame.
+    """
+    return pd.DataFrame({
+        'EV': np.random.normal(0, 1, 100),
+        'gamma': np.random.normal(0, 1, 100),
+        'oi': np.random.normal(0, 1, 100),
+        'profit': np.random.normal(0, 1, 100)
+    })
+
+def optimize_weights(historical_data, target='profit', features=['EV', 'gamma', 'oi']):
+    """
+    Optimize weights using linear regression on historical trade data.
+    """
+    X = historical_data[features]
+    y = historical_data[target]
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    model = LinearRegression()
+    model.fit(X_train, y_train)
+    return model.coef_
 
 def recommend_volatility_strategy(atm_iv, rv):
     """
