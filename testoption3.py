@@ -96,7 +96,8 @@ def load_credentials():
         if len(usernames) != len(passwords):
             st.error("The number of usernames and passwords do not match.")
             return {}
-        return dict(zip(usernames, passwords))
+        creds = dict(zip(usernames, passwords))
+        return creds
     except Exception as e:
         st.error(f"Error loading credentials: {e}")
         return {}
@@ -141,7 +142,7 @@ def fetch_instruments():
 def get_option_instruments(instruments, option_type, expiry_str):
     """
     Filter instruments by option type (C or P) and expiry.
-    Example: BTC-28MAR25-40000-C.
+    Example instrument: BTC-28MAR25-40000-C.
     """
     filtered = [inst["instrument_name"] for inst in instruments 
                 if inst["instrument_name"].startswith(f"BTC-{expiry_str}") 
@@ -314,7 +315,7 @@ def compute_realized_volatility_5min(df, annualize_days=365):
 ###########################################
 # OPTION DELTA, GAMMA, AND GEX CALCULATION FUNCTIONS
 ###########################################
-def compute_delta(row, S, position_side="short"):
+def compute_delta(row, S):
     """
     Compute the Black-Scholes delta for an option using timezone-aware datetimes.
     """
@@ -322,18 +323,22 @@ def compute_delta(row, S, position_side="short"):
         expiry_str = row["instrument_name"].split("-")[1]
         expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
         expiry_date = expiry_date.replace(tzinfo=row["date_time"].tzinfo)
-        now = dt.datetime.now(tz=row["date_time"].tzinfo)
-        T = (expiry_date - now).days / 365.0
-        T = T if T > 0 else 0.0001
-        K = row["k"]
-        sigma = row["iv_close"]
-        d1 = (np.log(S / K) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
-        return norm.cdf(d1) if row["option_type"] == "C" else norm.cdf(d1) - 1
-    except Exception as e:
-        st.error(f"Error computing delta for {row['instrument_name']}: {e}")
+    except Exception:
         return np.nan
+    T = (expiry_date - row["date_time"]).total_seconds() / (365.25 * 86400)
+    if T <= 0:
+        T = 0.0001
+    K = row["k"]
+    sigma = row["iv_close"]
+    # Optionally adjust sigma using a risk factor if available
+    sigma_eff = sigma
+    try:
+        d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
+    except Exception:
+        return np.nan
+    return norm.cdf(d1) if row["option_type"] == "C" else norm.cdf(d1) - 1
 
-def compute_gamma(row, S, position_side="short"):
+def compute_gamma(row, S):
     """
     Compute the Black-Scholes gamma for an option using timezone-aware datetimes.
     """
@@ -341,17 +346,20 @@ def compute_gamma(row, S, position_side="short"):
         expiry_str = row["instrument_name"].split("-")[1]
         expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
         expiry_date = expiry_date.replace(tzinfo=row["date_time"].tzinfo)
-        now = dt.datetime.now(tz=row["date_time"].tzinfo)
-        T = (expiry_date - now).days / 365.0
-        if T <= 0:
-            return np.nan
-        K = row["k"]
-        sigma = row["iv_close"]
-        d1 = (np.log(S / K) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
-        return norm.pdf(d1) / (S * sigma * np.sqrt(T))
-    except Exception as e:
-        st.error(f"Error computing gamma for {row['instrument_name']}: {e}")
+    except Exception:
         return np.nan
+    T = (expiry_date - row["date_time"]).total_seconds() / (365 * 24 * 3600)
+    if T <= 0:
+        return np.nan
+    K = row["k"]
+    sigma = row["iv_close"]
+    sigma_eff = sigma
+    try:
+        d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
+    except Exception:
+        return np.nan
+    gamma = norm.pdf(d1) / (S * sigma_eff * np.sqrt(T))
+    return gamma
 
 def compute_gex(row, S, oi):
     """
@@ -360,7 +368,7 @@ def compute_gex(row, S, oi):
     gamma = compute_gamma(row, S)
     if gamma is None or np.isnan(gamma):
         return np.nan
-    return gamma * oi * (S ** 2) * 0.01
+    return gamma * oi * (S ** 2)
 
 ###########################################
 # REALIZED VOLATILITY - EV CALCULATION FUNCTIONS
@@ -527,7 +535,6 @@ def recommend_volatility_strategy(atm_iv, rv):
 # MAIN DASHBOARD FUNCTION
 ###########################################
 def main():
-    # Enforce login using local text files for credentials
     login()
     st.title("Crypto Options Dashboard - Adaptive for Short or Long Volatility")
     
@@ -556,8 +563,8 @@ def main():
     spot_price = df_kraken["close"].iloc[-1]
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
     
-    # Compute Realized Volatility using EWMA Roger-Satchell method (annualized)
-    rv = compute_daily_realized_volatility(df_kraken, span=30, annualize_days=365)
+    # Compute Realized Volatility using 5-minute data (EWMA Roger-Satchell method)
+    rv = compute_realized_volatility_5min(df_kraken, annualize_days=365)
     st.write(f"Computed Realized Volatility (annualized): {rv:.4f}")
     
     # Fetch instruments and compute ATM IV for strategy recommendation
@@ -569,7 +576,6 @@ def main():
         return
     st.write(f"ATM Implied Volatility: {atm_iv:.4f}")
     
-    # Automatically Recommend Volatility Strategy
     recommended_strategy = recommend_volatility_strategy(atm_iv, rv)
     st.write(f"### Automatically Recommended Volatility Strategy: {recommended_strategy.upper()} VOL")
     if recommended_strategy == "short":
@@ -633,12 +639,12 @@ def main():
             temp = df[df["option_type"] == "C"]
             temp = temp[temp["instrument_name"] == instrument]
             if not temp.empty:
-                gamma_val = compute_gamma(temp.iloc[0], spot_price, position_side=position_side)
+                gamma_val = compute_gamma(temp.iloc[0], spot_price)
         else:
             temp = df[df["option_type"] == "P"]
             temp = temp[temp["instrument_name"] == instrument]
             if not temp.empty:
-                gamma_val = compute_gamma(temp.iloc[0], spot_price, position_side=position_side)
+                gamma_val = compute_gamma(temp.iloc[0], spot_price)
         if np.isnan(gamma_val):
             gamma_val = np.random.uniform(0.01, 0.05)
         ticker_list.append({
@@ -739,32 +745,7 @@ def adjust_for_liquidity(ticker_list):
                 item['EV'] *= (1 - spread / mid)
     return ticker_list
 
-def load_previous_trades():
-    """
-    Load historical trade data for backtesting.
-    For demonstration, returns a dummy DataFrame.
-    """
-    return pd.DataFrame({
-        'EV': np.random.normal(0, 1, 100),
-        'gamma': np.random.normal(0, 1, 100),
-        'oi': np.random.normal(0, 1, 100),
-        'profit': np.random.normal(0, 1, 100)
-    })
 
-def optimize_weights(historical_data, target='profit', features=['EV', 'gamma', 'oi']):
-    """
-    Optimize weights using linear regression on historical trade data.
-    """
-    X = historical_data[features]
-    y = historical_data[target]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = LinearRegression()
-    model.fit(X_train, y_train)
-    return model.coef_
-
-###########################################
-# AUTOMATIC VOLATILITY STRATEGY RECOMMENDATION
-###########################################
 def recommend_volatility_strategy(atm_iv, rv):
     """
     Recommend a volatility strategy based on ATM IV and realized volatility.
