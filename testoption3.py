@@ -289,28 +289,27 @@ def calculate_ewma_roger_satchell_volatility(price_data, span=30):
     volatility = np.sqrt(ewma_rs.clip(lower=0))
     return volatility
 
-def compute_daily_realized_volatility(df, span=30, annualize_days=365):
+def compute_realized_volatility_5min(df, annualize_days=365):
     """
-    Resample the underlying data daily using OHLC aggregation, compute the
-    EWMA Roger-Satchell volatility, annualize it, and return the last value as a scalar.
+    Compute realized volatility using 5-minute data with the Roger-Satchell estimator.
+    Annualizes based on the number of 5-minute intervals in a year.
     """
-    if 'date_time' in df.columns:
-        df_daily = df.resample('D', on='date_time').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last'
-        }).dropna()
-    else:
-        df_daily = df.resample('D').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last'
-        }).dropna()
-    daily_vol = calculate_ewma_roger_satchell_volatility(df_daily, span=span)
-    daily_vol_annualized = daily_vol * np.sqrt(annualize_days)
-    return daily_vol_annualized.iloc[-1]
+    df = df.copy()
+    # Calculate RS for each 5-minute interval
+    df['rs'] = (np.log(df['high'] / df['close']) * np.log(df['high'] / df['open']) +
+                np.log(df['low'] / df['close']) * np.log(df['low'] / df['open']))
+    total_variance = df['rs'].sum()
+    if total_variance <= 0:
+        return 0.0
+    # Number of 5-minute intervals in the data
+    N = len(df)
+    if N == 0:
+        return 0.0
+    # Number of 5-minute intervals in a year
+    M = annualize_days * 24 * 12  # 12 intervals per hour
+    annualization_factor = np.sqrt(M / N)
+    realized_vol = np.sqrt(total_variance) * annualization_factor
+    return realized_vol
 
 ###########################################
 # OPTION DELTA, GAMMA, AND GEX CALCULATION FUNCTIONS
