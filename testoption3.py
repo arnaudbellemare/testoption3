@@ -44,7 +44,7 @@ def params(instrument_name):
         "instrument_name": instrument_name,
     }
 
-# Column names returned by the Thalex API for mark price data
+# Column names for Thalex API data
 COLUMNS = [
     "ts",
     "mark_price_open",
@@ -351,6 +351,16 @@ def adjust_ev(ev_value, position_side):
     else:
         return ev_value
 
+# Function to adjust IV using a volatility smile
+def adjust_volatility_with_smile(strike, smile_df):
+    # Ensure smile_df is sorted by strike
+    sorted_smile = smile_df.sort_values("strike")
+    strikes = sorted_smile["strike"].values
+    ivs = sorted_smile["iv"].values
+    # Use linear interpolation as a simple approach
+    adjusted_iv = np.interp(strike, strikes, ivs)
+    return adjusted_iv
+
 def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0, position_side="short"):
     """
     Build the ticker list and compute EV and Gamma Exposure (GEX) for each instrument.
@@ -378,19 +388,19 @@ def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0, position_side=
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
 
-        # Conditional EV calculation based on recommended position and IV vs RV:
+        # Conditional EV calculation
         if position_side.lower() == "short":
             if adjusted_iv > rv:
                 ev_value = (((adjusted_iv**2 - rv**2) * T) / 2) * 100
             else:
                 ev_value = -(((rv**2 - adjusted_iv**2) * T) / 2) * 100
-        else:  # long volatility position
+        else:  # Long volatility position
             if adjusted_iv < rv:
                 ev_value = -(((rv**2 - adjusted_iv**2) * T) / 2) * 100
             else:
                 ev_value = (((adjusted_iv**2 - rv**2) * T) / 2) * 100
 
-        # Calculate gamma using Black-Scholes if adjusted_iv and T are valid
+        # Calculate gamma using Black-Scholes formula if adjusted_iv and T are valid
         if adjusted_iv > 0 and T > 0:
             d1_for_gamma = (np.log(spot/strike) + 0.5*adjusted_iv**2*T) / (adjusted_iv*np.sqrt(T))
             gamma_val = norm.pdf(d1_for_gamma) / (spot * adjusted_iv * np.sqrt(T))
@@ -421,7 +431,6 @@ def normalize_metrics(metrics):
     return (arr - np.mean(arr)) / np.std(arr)
 
 def compute_composite_scores(ticker_list, position_side='short'):
-    # Ensure each ticker has a gex value; if missing, set to 0.
     for item in ticker_list:
         if 'gex' not in item:
             item['gex'] = 0
@@ -433,7 +442,6 @@ def compute_composite_scores(ticker_list, position_side='short'):
     norm_gex = normalize_metrics(gex_list)
     norm_oi = normalize_metrics(oi_list)
     
-    # Adjust weights as needed.
     weights = {"ev": 0.5, "gex": (-0.3 if position_side.lower() == 'short' else 0.3), "oi": 0.2}
     
     for i, item in enumerate(ticker_list):
@@ -726,7 +734,7 @@ def main():
     # Build the smile DataFrame
     smile_df = build_smile_df(preliminary_ticker_list)
     global ticker_list
-    # Pass "short" or "long" as the recommended position for EV calculation.
+    # Pass "short" (or "long") as the recommended position for EV calculation.
     ticker_list = build_ticker_list(all_instruments, spot_price, T_YEARS, smile_df, rv=rv_scalar, position_side="short")
 
     rv_vol = calculate_btc_annualized_volatility_daily(df_kraken)
