@@ -58,18 +58,13 @@ COLUMNS = [
 # Sophisticated Risk Adjustment using Cornish-Fisher
 ###########################################
 def compute_risk_adjustment_factor_cf(df, alpha=0.05):
-    """
-    Computes a risk adjustment factor using the Cornish-Fisher expansion.
-    """
     df = df.copy()
     if "close" not in df.columns:
         return 1.0
     returns = df['close'].pct_change().dropna()
     S = returns.skew()      # Standardized skewness
-    # Adjust for full kurtosis (pandas usually gives excess kurtosis)
-    K = returns.kurtosis() + 3  
+    K = returns.kurtosis() + 3  # Adjust for full kurtosis (pandas usually gives excess kurtosis)
     z = norm.ppf(alpha)     # Standard normal quantile (e.g., ~ -1.645 for alpha=0.05)
-    # Cornish-Fisher adjusted quantile
     z_cf = z + (z**2 - 1) * S / 6 + (z**3 - 3*z) * (K - 3) / 24 - (2*z**3 - 5*z) * (S**2) / 36
     risk_factor = abs(z_cf / z) if z != 0 else 1.0
     return risk_factor
@@ -261,9 +256,6 @@ def fetch_kraken_data():
 # EWMA-ROGER SATCHELL VOLATILITY CALCULATION
 ###########################################
 def calculate_ewma_roger_satchell_volatility(price_data, span=days_to_expiry):
-    """
-    Calculate realized volatility using the Roger-Satchell estimator with an EWMA.
-    """
     df = price_data.copy()
     df['rs'] = (np.log(df['high'] / df['close']) * np.log(df['high'] / df['open']) +
                 np.log(df['low'] / df['close']) * np.log(df['low'] / df['open']))
@@ -272,9 +264,6 @@ def calculate_ewma_roger_satchell_volatility(price_data, span=days_to_expiry):
     return volatility
 
 def compute_realized_volatility_5min(df, annualize_days=365):
-    """
-    Compute realized volatility using 5-minute data with the Roger-Satchell estimator.
-    """
     df = df.copy()
     df['rs'] = (np.log(df['high'] / df['close']) * np.log(df['high'] / df['open']) +
                 np.log(df['low'] / df['close']) * np.log(df['low'] / df['open']))
@@ -284,7 +273,6 @@ def compute_realized_volatility_5min(df, annualize_days=365):
     N = len(df)
     if N == 0:
         return 0.0
-    # Number of 5-minute intervals in a year (assuming 24h trading)
     M = annualize_days * 24 * 12
     annualization_factor = np.sqrt(M / N)
     realized_vol = np.sqrt(total_variance) * annualization_factor
@@ -294,9 +282,6 @@ def compute_realized_volatility_5min(df, annualize_days=365):
 # BTC DAILY ANNUALIZED REALIZED VOLATILITY CALCULATION
 ###########################################
 def calculate_btc_annualized_volatility_daily(df):
-    """
-    Calculates the annualized realized volatility of BTC using the last 30 days of daily percentage returns.
-    """
     if "date_time" not in df.columns:
         if isinstance(df.index, pd.DatetimeIndex):
             df = df.reset_index()
@@ -312,9 +297,6 @@ def calculate_btc_annualized_volatility_daily(df):
     return annualized_vol
 
 def calculate_daily_realized_volatility_series(df):
-    """
-    Calculates a daily series of realized volatility using a 30-day rolling window of daily returns.
-    """
     if "date_time" not in df.columns:
         if isinstance(df.index, pd.DatetimeIndex):
             df = df.reset_index()
@@ -556,14 +538,18 @@ def build_smile_df(ticker_list):
     df = pd.DataFrame(ticker_list)
     df = df.dropna(subset=["iv"])
     smile_df = df.groupby("strike", as_index=False)["iv"].mean()
-    # Rename column for consistency
     smile_df.rename(columns={"iv": "iv"}, inplace=True)
     return smile_df
 
 ###########################################
 # TICKER LIST BUILDER WITH SMILE ADJUSTMENT
 ###########################################
-def build_ticker_list(all_instruments, spot, T, smile_df):
+def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0):
+    """
+    Build the ticker list and compute EV for each instrument.
+    The EV is calculated as: (((iv^2 - rv^2) * T) / 2) * 100.
+    Adjust the formula as needed.
+    """
     ticker_list = []
     for instrument in all_instruments:
         ticker_data = fetch_ticker(instrument)
@@ -583,13 +569,16 @@ def build_ticker_list(all_instruments, spot, T, smile_df):
         except Exception:
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
+        # Compute EV using the provided realized volatility (rv)
+        ev_value = (((adjusted_iv**2 - rv**2) * T) / 2) * 100
         ticker_list.append({
             "instrument": instrument,
             "strike": strike,
             "option_type": option_type,
             "open_interest": ticker_data["open_interest"],
             "delta": delta_est,
-            "iv": adjusted_iv
+            "iv": adjusted_iv,
+            "EV": ev_value
         })
     return ticker_list
 
@@ -779,13 +768,6 @@ def normalize_metrics(metrics):
     return (arr - np.mean(arr)) / np.std(arr)
 
 def compute_composite_scores(ticker_list, position_side='short'):
-    """
-    Compute composite scores for a list of tickers.
-    Each ticker should have:
-      - 'EV'
-      - 'gamma'
-      - 'open_interest'
-    """
     ev_list = [item['EV'] for item in ticker_list]
     gamma_list = [item.get('gamma', 0) for item in ticker_list]
     oi_list = [item['open_interest'] for item in ticker_list]
@@ -794,10 +776,7 @@ def compute_composite_scores(ticker_list, position_side='short'):
     norm_gamma = normalize_metrics(gamma_list)
     norm_oi = normalize_metrics(oi_list)
     
-    if position_side.lower() == 'short':
-        weights = {"ev": 0.5, "gamma": -0.3, "oi": 0.2}
-    else:
-        weights = {"ev": 0.5, "gamma": 0.3, "oi": 0.2}
+    weights = {"ev": 0.5, "gamma": (-0.3 if position_side.lower() == 'short' else 0.3), "oi": 0.2}
     
     for i, item in enumerate(ticker_list):
         composite_score = (weights["ev"] * norm_ev[i] +
@@ -857,6 +836,10 @@ def main():
     st.write("Filtered Put Instruments:", filtered_puts)
     all_instruments = filtered_calls + filtered_puts
 
+    # Compute realized volatility before building the ticker list.
+    daily_rv_series = calculate_daily_realized_volatility_series(df_kraken)
+    rv_scalar = daily_rv_series.iloc[-1] if not daily_rv_series.empty else 0.0
+
     df = fetch_data(tuple(all_instruments))
     if df.empty:
         st.error("No data fetched from Thalex. Please check the API or instrument names.")
@@ -898,7 +881,7 @@ def main():
         })
     smile_df = build_smile_df(preliminary_ticker_list)
     global ticker_list
-    ticker_list = build_ticker_list(all_instruments, spot_price, T_YEARS, smile_df)
+    ticker_list = build_ticker_list(all_instruments, spot_price, T_YEARS, smile_df, rv=rv_scalar)
 
     rv_vol = calculate_btc_annualized_volatility_daily(df_kraken)
     daily_rv_series = calculate_daily_realized_volatility_series(df_kraken)
@@ -1027,18 +1010,14 @@ def main():
     ###########################################
     # COMPOSITE SCORE TABLE (Using Actual Data)
     ###########################################
-    # Compute composite scores for both strategies using the actual ticker_list
     short_scores = compute_composite_scores(ticker_list.copy(), position_side="short")
     long_scores = compute_composite_scores(ticker_list.copy(), position_side="long")
     
-    # Convert the resulting lists into DataFrames
     df_short = pd.DataFrame(short_scores)
     df_long = pd.DataFrame(long_scores)
     
-    # Combine the two DataFrames into a single table
     df_combined = pd.concat([df_short, df_long], ignore_index=True)
     
-    # Rearranging columns for clarity
     if "EV" in df_combined.columns and "gamma" in df_combined.columns and "open_interest" in df_combined.columns:
         df_combined = df_combined[["instrument", "strategy", "EV", "gamma", "open_interest", "composite_score"]]
         st.subheader("Combined Composite Score Table")
