@@ -31,6 +31,9 @@ T_YEARS = days_to_expiry / 365
 # Dictionary for rolling window configuration (if needed later)
 windows = {"7D": "vrp_7d"}
 
+###########################################
+# Helper Functions
+###########################################
 def params(instrument_name):
     now = dt.datetime.now()
     start_dt = now - dt.timedelta(days=7)
@@ -55,7 +58,7 @@ COLUMNS = [
 ]
 
 ###########################################
-# Sophisticated Risk Adjustment using Cornish-Fisher
+# Risk Adjustment
 ###########################################
 def compute_risk_adjustment_factor_cf(df, alpha=0.05):
     df = df.copy()
@@ -63,14 +66,14 @@ def compute_risk_adjustment_factor_cf(df, alpha=0.05):
         return 1.0
     returns = df['close'].pct_change().dropna()
     S = returns.skew()      # Standardized skewness
-    K = returns.kurtosis() + 3  # Adjust for full kurtosis (pandas usually gives excess kurtosis)
-    z = norm.ppf(alpha)     # Standard normal quantile (e.g., ~ -1.645 for alpha=0.05)
+    K = returns.kurtosis() + 3  # Adjust for full kurtosis
+    z = norm.ppf(alpha)     # e.g., ~ -1.645 for alpha=0.05
     z_cf = z + (z**2 - 1) * S / 6 + (z**3 - 3*z) * (K - 3) / 24 - (2*z**3 - 5*z) * (S**2) / 36
     risk_factor = abs(z_cf / z) if z != 0 else 1.0
     return risk_factor
 
 ###########################################
-# EXPIRATION DATE HELPER FUNCTIONS
+# Expiration Date Helpers
 ###########################################
 def get_valid_expiration_options(current_date=None):
     if current_date is None:
@@ -102,7 +105,7 @@ def compute_expiry_date(selected_day, current_date=None):
     return expiry
 
 ###########################################
-# CREDENTIALS & LOGIN FUNCTIONS
+# Credentials & Login Functions
 ###########################################
 def load_credentials():
     try:
@@ -136,7 +139,7 @@ def login():
         st.stop()
 
 ###########################################
-# INSTRUMENTS FETCHING & FILTERING FUNCTIONS
+# Instruments Fetching & Filtering Functions
 ###########################################
 def fetch_instruments():
     response = requests.get(url_instruments)
@@ -197,7 +200,7 @@ def get_filtered_instruments(spot_price, expiry_str=DEFAULT_EXPIRY_STR, t_years=
     return filtered_calls, filtered_puts
 
 ###########################################
-# DATA FETCHING FUNCTIONS
+# Data Fetching Functions
 ###########################################
 @st.cache_data(ttl=30)
 def fetch_data(instruments_tuple):
@@ -232,7 +235,7 @@ def fetch_ticker(instrument_name):
     return data.get("result", {})
 
 ###########################################
-# UPDATED KRAKEN DATA FETCH (Dual Timeframe)
+# Kraken Data Fetch (Dual Timeframe)
 ###########################################
 def fetch_kraken_data():
     kraken = ccxt.kraken()
@@ -253,7 +256,7 @@ def fetch_kraken_data():
     return full_df[~full_df.index.duplicated()]
 
 ###########################################
-# VOLATILITY CALCULATIONS
+# Volatility Calculations
 ###########################################
 def calculate_ewma_roger_satchell_volatility(price_data, span=days_to_expiry):
     df = price_data.copy()
@@ -305,7 +308,7 @@ def calculate_daily_realized_volatility_series(df):
     return volatility_series.dropna()
 
 ###########################################
-# DAILY AVERAGE IV & HISTORICAL VRP
+# Daily Average IV & Historical VRP
 ###########################################
 def compute_daily_average_iv(df_iv_agg):
     daily_iv = df_iv_agg["iv_mean"].resample("D").mean(numeric_only=True).dropna().tolist()
@@ -316,7 +319,7 @@ def compute_historical_vrp(daily_iv, daily_rv):
     return [(iv ** 2) - (rv ** 2) for iv, rv in zip(daily_iv[:n], daily_rv[:n])]
 
 ###########################################
-# OPTION DELTA CALCULATION
+# Option Delta Calculation
 ###########################################
 def compute_delta(row, S):
     try:
@@ -340,7 +343,7 @@ def compute_delta(row, S):
     return norm.cdf(d1) if row["option_type"] == "C" else norm.cdf(d1) - 1
 
 ###########################################
-# EV & GAMMA EXPOSURE (GEX) CALCULATIONS
+# EV & Gamma Exposure (GEX) Calculations
 ###########################################
 def adjust_ev(ev_value, position_side):
     if position_side.lower() == "long":
@@ -348,10 +351,9 @@ def adjust_ev(ev_value, position_side):
     else:
         return ev_value
 
-# In this function, we calculate EV and also compute Gamma Exposure (GEX) using the Black–Scholes gamma formula.
 def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0, position_side="short"):
     """
-    Build the ticker list and compute EV and GEX for each instrument.
+    Build the ticker list and compute EV and Gamma Exposure (GEX) for each instrument.
     EV is conditionally calculated based on relative IV and RV.
     GEX is computed as: gamma * open_interest * spot^2.
     """
@@ -376,7 +378,7 @@ def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0, position_side=
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
 
-        # Conditional EV calculation based on recommended position and IV vs RV
+        # Conditional EV calculation based on recommended position and IV vs RV:
         if position_side.lower() == "short":
             if adjusted_iv > rv:
                 ev_value = (((adjusted_iv**2 - rv**2) * T) / 2) * 100
@@ -388,13 +390,13 @@ def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0, position_side=
             else:
                 ev_value = (((adjusted_iv**2 - rv**2) * T) / 2) * 100
 
-        # Calculate gamma using the Black–Scholes formula if adjusted_iv and T are valid
+        # Calculate gamma using Black-Scholes if adjusted_iv and T are valid
         if adjusted_iv > 0 and T > 0:
             d1_for_gamma = (np.log(spot/strike) + 0.5*adjusted_iv**2*T) / (adjusted_iv*np.sqrt(T))
             gamma_val = norm.pdf(d1_for_gamma) / (spot * adjusted_iv * np.sqrt(T))
         else:
             gamma_val = 0
-        # Gamma Exposure (GEX) by Strike
+        # Gamma Exposure (GEX)
         gex_value = gamma_val * ticker_data["open_interest"] * (spot**2)
 
         ticker_list.append({
@@ -410,7 +412,7 @@ def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0, position_side=
     return ticker_list
 
 ###########################################
-# COMPOSITE SCORE CALCULATION
+# Composite Score Calculation
 ###########################################
 def normalize_metrics(metrics):
     arr = np.array(metrics)
@@ -431,7 +433,7 @@ def compute_composite_scores(ticker_list, position_side='short'):
     norm_gex = normalize_metrics(gex_list)
     norm_oi = normalize_metrics(oi_list)
     
-    # Use weights for EV, GEX, and open interest. Adjust as needed.
+    # Adjust weights as needed.
     weights = {"ev": 0.5, "gex": (-0.3 if position_side.lower() == 'short' else 0.3), "oi": 0.2}
     
     for i, item in enumerate(ticker_list):
@@ -443,7 +445,17 @@ def compute_composite_scores(ticker_list, position_side='short'):
     return ticker_list
 
 ###########################################
-# TRADE STRATEGY EVALUATION
+# Build Smile DataFrame
+###########################################
+def build_smile_df(ticker_list):
+    df = pd.DataFrame(ticker_list)
+    df = df.dropna(subset=["iv"])
+    smile_df = df.groupby("strike", as_index=False)["iv"].mean()
+    smile_df.rename(columns={"iv": "iv"}, inplace=True)
+    return smile_df
+
+###########################################
+# Trade Strategy Evaluation
 ###########################################
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
                             historical_vols=None, historical_vrps=None, expiry_date=None):
@@ -556,7 +568,7 @@ def classify_vrp_regime(current_vrp, historical_vrps):
         return "Neutral"
 
 ###########################################
-# VISUALIZATION FUNCTIONS
+# Visualization Functions
 ###########################################
 def plot_gamma_heatmap(df):
     st.subheader("Gamma Heatmap by Strike and Time")
@@ -619,7 +631,7 @@ def classify_volatility_regime(current_vol, historical_vols):
         return "Medium Volatility"
 
 ###########################################
-# MAIN DASHBOARD
+# Main Dashboard
 ###########################################
 def main():
     login()
@@ -711,9 +723,10 @@ def main():
             "open_interest": ticker_data["open_interest"],
             "iv": raw_iv
         })
+    # Build the smile DataFrame
     smile_df = build_smile_df(preliminary_ticker_list)
     global ticker_list
-    # Pass "short" or "long" to indicate the recommended position for EV calculation.
+    # Pass "short" or "long" as the recommended position for EV calculation.
     ticker_list = build_ticker_list(all_instruments, spot_price, T_YEARS, smile_df, rv=rv_scalar, position_side="short")
 
     rv_vol = calculate_btc_annualized_volatility_daily(df_kraken)
@@ -830,7 +843,6 @@ def main():
         if candidate.empty:
             continue
         row = candidate.iloc[0]
-        # Compute GEX using the compute_gex function from earlier if needed
         gex = row.get("gex", np.nan)
         gex_data.append({"strike": strike, "gex": gex, "option_type": option_type})
     df_gex = pd.DataFrame(gex_data)
@@ -839,7 +851,7 @@ def main():
         plot_net_gex(df_gex, spot_price)
     
     ###########################################
-    # COMPOSITE SCORE TABLE (Using Actual Data)
+    # Composite Score Table (Using Actual Data)
     ###########################################
     short_scores = compute_composite_scores(ticker_list.copy(), position_side="short")
     long_scores = compute_composite_scores(ticker_list.copy(), position_side="long")
@@ -849,7 +861,6 @@ def main():
     
     df_combined = pd.concat([df_short, df_long], ignore_index=True)
     
-    # If 'gex' is missing, fill it with 0 so the table can be displayed.
     if "EV" in df_combined.columns and "open_interest" in df_combined.columns:
         if "gex" not in df_combined.columns:
             df_combined["gex"] = 0
