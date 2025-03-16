@@ -558,7 +558,7 @@ def main():
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
     
     # Compute Realized Volatility using EWMA Roger-Satchell method (annualized)
-    rv = compute_daily_realized_volatility(df_kraken, span=30, annualize_days=252)
+    rv = compute_daily_realized_volatility(df_kraken, span=30, annualize_days=365)
     st.write(f"Computed Realized Volatility (annualized): {rv:.4f}")
     
     # Fetch instruments and compute ATM IV for strategy recommendation
