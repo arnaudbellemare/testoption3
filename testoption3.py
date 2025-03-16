@@ -544,11 +544,11 @@ def build_smile_df(ticker_list):
 ###########################################
 # TICKER LIST BUILDER WITH SMILE ADJUSTMENT
 ###########################################
-def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0):
+def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0, position_side="short"):
     """
     Build the ticker list and compute EV for each instrument.
-    The EV is calculated as: (((iv^2 - rv^2) * T) / 2) * 100.
-    Adjust the formula as needed.
+    The EV is now calculated conditionally based on the relative levels of IV and RV
+    and the recommended position.
     """
     ticker_list = []
     for instrument in all_instruments:
@@ -569,8 +569,19 @@ def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0):
         except Exception:
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
-        # Compute EV using the provided realized volatility (rv)
-        ev_value = (((adjusted_iv**2 - rv**2) * T) / 2) * 100
+
+        # Updated EV calculation conditional on position_side and relative IV/RV:
+        if position_side.lower() == "short":
+            if adjusted_iv > rv:
+                ev_value = (((adjusted_iv**2 - rv**2) * T) / 2) * 100
+            else:
+                ev_value = -(((rv**2 - adjusted_iv**2) * T) / 2) * 100
+        else:  # long volatility position
+            if adjusted_iv < rv:
+                ev_value = -(((rv**2 - adjusted_iv**2) * T) / 2) * 100
+            else:
+                ev_value = (((adjusted_iv**2 - rv**2) * T) / 2) * 100
+
         ticker_list.append({
             "instrument": instrument,
             "strike": strike,
@@ -885,7 +896,8 @@ def main():
         })
     smile_df = build_smile_df(preliminary_ticker_list)
     global ticker_list
-    ticker_list = build_ticker_list(all_instruments, spot_price, T_YEARS, smile_df, rv=rv_scalar)
+    # Pass the recommended position to build_ticker_list (e.g., "short" for short volatility)
+    ticker_list = build_ticker_list(all_instruments, spot_price, T_YEARS, smile_df, rv=rv_scalar, position_side="short")
 
     rv_vol = calculate_btc_annualized_volatility_daily(df_kraken)
     daily_rv_series = calculate_daily_realized_volatility_series(df_kraken)
