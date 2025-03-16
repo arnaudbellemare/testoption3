@@ -351,13 +351,10 @@ def adjust_ev(ev_value, position_side):
     else:
         return ev_value
 
-# Function to adjust IV using a volatility smile
 def adjust_volatility_with_smile(strike, smile_df):
-    # Ensure smile_df is sorted by strike
     sorted_smile = smile_df.sort_values("strike")
     strikes = sorted_smile["strike"].values
     ivs = sorted_smile["iv"].values
-    # Use linear interpolation as a simple approach
     adjusted_iv = np.interp(strike, strikes, ivs)
     return adjusted_iv
 
@@ -402,7 +399,7 @@ def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0, position_side=
 
         # Calculate gamma using Black-Scholes formula if adjusted_iv and T are valid
         if adjusted_iv > 0 and T > 0:
-            d1_for_gamma = (np.log(spot/strike) + 0.5*adjusted_iv**2*T) / (adjusted_iv*np.sqrt(T))
+            d1_for_gamma = (np.log(spot/strike) + 0.5 * adjusted_iv**2 * T) / (adjusted_iv * np.sqrt(T))
             gamma_val = norm.pdf(d1_for_gamma) / (spot * adjusted_iv * np.sqrt(T))
         else:
             gamma_val = 0
