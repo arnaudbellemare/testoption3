@@ -17,12 +17,6 @@ from scipy.interpolate import CubicSpline
 # EXPIRATION DATE SELECTION FUNCTIONS
 ###########################################
 def get_valid_expiration_options(current_date=None):
-    """
-    Return valid expiration day options based on today's date.
-    If today's date is before the 14th, both 14 and 28 are valid.
-    If it's on/after the 14th but before 28, only 28 is valid.
-    If it's on/after 28, provide 14 and 28 for the next month.
-    """
     if current_date is None:
         current_date = dt.datetime.now()
     if current_date.day < 14:
@@ -33,10 +27,6 @@ def get_valid_expiration_options(current_date=None):
         return [14, 28]
 
 def compute_expiry_date(selected_day, current_date=None):
-    """
-    Compute the expiration date based on the selected day.
-    Uses the current month if possible; otherwise, rolls over to the next month.
-    """
     if current_date is None:
         current_date = dt.datetime.now()
     try:
@@ -63,10 +53,6 @@ TICKER_ENDPOINT = "ticker"
 URL_TICKER = f"{BASE_URL}/{TICKER_ENDPOINT}"
 
 def params(instrument_name):
-    """
-    Define query parameters for the Thalex API,
-    fetching data from the last 7 days at 5-minute resolution.
-    """
     now = dt.datetime.now()
     start_dt = now - dt.timedelta(days=7)
     return {
@@ -85,10 +71,6 @@ COLUMNS = [
 # CREDENTIALS & LOGIN FUNCTIONS (USING TEXT FILES)
 ###########################################
 def load_credentials():
-    """
-    Load user credentials from local text files: usernames.txt and passwords.txt.
-    Each file should have one entry per line.
-    """
     try:
         with open("usernames.txt", "r") as f_user:
             usernames = [line.strip() for line in f_user if line.strip()]
@@ -104,10 +86,6 @@ def load_credentials():
         return {}
 
 def login():
-    """
-    Display a login form and validate credentials using local text files.
-    Sets st.session_state.logged_in to True upon successful login.
-    """
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
     if not st.session_state.logged_in:
@@ -128,9 +106,6 @@ def login():
 # INSTRUMENTS FETCHING & FILTERING FUNCTIONS
 ###########################################
 def fetch_instruments():
-    """
-    Fetch the list of instruments from the Thalex API.
-    """
     try:
         response = requests.get(url_instruments)
         response.raise_for_status()
@@ -141,19 +116,12 @@ def fetch_instruments():
         return []
 
 def get_option_instruments(instruments, option_type, expiry_str):
-    """
-    Filter instruments by option type (C or P) and expiry.
-    Example: BTC-28MAR25-40000-C.
-    """
     filtered = [inst["instrument_name"] for inst in instruments 
                 if inst["instrument_name"].startswith(f"BTC-{expiry_str}") 
                 and inst["instrument_name"].endswith(f"-{option_type}")]
     return sorted(filtered)
 
 def get_actual_iv(instrument_name):
-    """
-    Fetch mark price data for a specific instrument and return its latest iv_close.
-    """
     try:
         response = requests.get(url_mark_price, params=params(instrument_name))
         response.raise_for_status()
@@ -169,9 +137,6 @@ def get_actual_iv(instrument_name):
         return None
 
 def get_atm_iv(calls_all, spot_price):
-    """
-    Compute the ATM IV by selecting the call whose strike is closest to the spot price.
-    """
     try:
         strike_list = [(inst, int(inst.split("-")[2])) for inst in calls_all]
         strike_list.sort(key=lambda x: abs(x[1] - spot_price))
@@ -183,10 +148,6 @@ def get_atm_iv(calls_all, spot_price):
         return None
 
 def get_filtered_instruments(spot_price, expiry_str, t_years, multiplier=1):
-    """
-    Filter instruments based on a theoretical range using the ATM IV as a proxy.
-    The range is defined as spot_price * exp(± atm_iv * sqrt(t_years) * multiplier).
-    """
     instruments_list = fetch_instruments()
     calls_all = get_option_instruments(instruments_list, "C", expiry_str)
     puts_all = get_option_instruments(instruments_list, "P", expiry_str)
@@ -210,9 +171,6 @@ def get_filtered_instruments(spot_price, expiry_str, t_years, multiplier=1):
 ###########################################
 @st.cache_data(ttl=30)
 def fetch_data(instruments_tuple):
-    """
-    Fetch Thalex mark price data for given instruments over the past 7 days.
-    """
     instruments = list(instruments_tuple)
     try:
         df = (
@@ -240,9 +198,6 @@ def fetch_data(instruments_tuple):
 
 @st.cache_data(ttl=30)
 def fetch_ticker(instrument_name):
-    """
-    Fetch ticker data for a given instrument from the Thalex API.
-    """
     try:
         params_dict = {"instrument_name": instrument_name}
         response = requests.get(URL_TICKER, params=params_dict)
@@ -254,9 +209,6 @@ def fetch_ticker(instrument_name):
         return {}
 
 def fetch_kraken_data():
-    """
-    Fetch 7 days of 5-minute BTC/USD data from Kraken using ccxt.
-    """
     try:
         kraken = ccxt.kraken()
         now_dt = dt.datetime.now()
@@ -278,287 +230,21 @@ def fetch_kraken_data():
         st.error(f"Error fetching Kraken data: {e}")
         return pd.DataFrame()
 
-
 ###########################################
-# REALIZED VOLATILITY CALCULATION FUNCTIONS
-###########################################
-def calculate_btc_annualized_volatility_daily(df):
-    """
-    Calculates the annualized realized volatility of BTC using the last 30 days
-    of daily percentage returns.
-    """
-    # Ensure the DataFrame has a 'date_time' column
-    if "date_time" not in df.columns:
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df.reset_index()  # Convert index to 'date_time' column
-        else:
-            raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
-    # Resample to daily data using the last available close price of each day
-    df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
-    # Calculate daily percentage returns
-    df_daily["daily_return"] = df_daily["close"].pct_change()
-    # Get the last 30 days of returns
-    last_30_returns = df_daily["daily_return"].dropna().tail(30)
-    if last_30_returns.empty:
-        return np.nan
-    daily_std = last_30_returns.std()
-    annualized_vol = daily_std * np.sqrt(365)
-    return annualized_vol
-
-def calculate_daily_realized_volatility_series(df):
-    """
-    Calculates a daily series of realized volatility using the daily percentage returns
-    over a 30-day rolling window.
-    """
-    if "date_time" not in df.columns:
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df.reset_index()
-        else:
-            raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
-    df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
-    df_daily["daily_return"] = df_daily["close"].pct_change()
-    volatility_series = df_daily["daily_return"].rolling(window=30).std() * np.sqrt(365)
-    return volatility_series.dropna()
-
-
-###########################################
-# OPTION DELTA, GAMMA, AND GEX CALCULATION FUNCTIONS
-###########################################
-def compute_delta(row, S):
-    """
-    Compute the Black-Scholes delta for an option using timezone-aware datetimes.
-    """
-    try:
-        expiry_str = row["instrument_name"].split("-")[1]
-        expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
-        expiry_date = expiry_date.replace(tzinfo=row["date_time"].tzinfo)
-    except Exception:
-        return np.nan
-    T = (expiry_date - row["date_time"]).total_seconds() / (365.25 * 86400)
-    if T <= 0:
-        T = 0.0001
-    K = row["k"]
-    sigma = row["iv_close"]
-    if sigma <= 0:
-        return np.nan
-    sigma_eff = sigma  # Optionally adjust sigma with a risk factor if needed
-    try:
-        d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
-    except Exception:
-        return np.nan
-    return norm.cdf(d1) if row["option_type"] == "C" else norm.cdf(d1) - 1
-
-def compute_gamma(row, S):
-    """
-    Compute the Black-Scholes gamma for an option using timezone-aware datetimes.
-    """
-    try:
-        expiry_str = row["instrument_name"].split("-")[1]
-        expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
-        expiry_date = expiry_date.replace(tzinfo=row["date_time"].tzinfo)
-    except Exception:
-        return np.nan
-    T = (expiry_date - row["date_time"]).total_seconds() / (365 * 24 * 3600)
-    if T <= 0:
-        return np.nan
-    K = row["k"]
-    sigma = row["iv_close"]
-    if sigma <= 0:
-        return np.nan
-    sigma_eff = sigma  # Adjust if needed
-    try:
-        d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
-    except Exception:
-        return np.nan
-    gamma = norm.pdf(d1) / (S * sigma_eff * np.sqrt(T))
-    return gamma
-
-def compute_gex(row, S, oi):
-    """
-    Compute Gamma Exposure (GEX) for an option, scaled for interpretability.
-    """
-    gamma = compute_gamma(row, S)
-    if gamma is None or np.isnan(gamma):
-        return np.nan
-    return gamma * oi * (S ** 2)
-
-###########################################
-# REALIZED VOLATILITY - EV CALCULATION FUNCTIONS
-###########################################
-def compute_ev(iv, rv, T, position_side="short"):
-    """
-    Compute the Expected Value (EV) for an option strategy.
-    For short volatility: EV = (((iv^2 - rv^2) * T) / 2) * 100
-    For long volatility: EV = (((rv^2 - iv^2) * T) / 2) * 100
-    """
-    try:
-        if position_side.lower() == "short":
-            ev = (((iv**2 - rv**2) * T) / 2) * 100
-        elif position_side.lower() == "long":
-            ev = (((rv**2 - iv**2) * T) / 2) * 100
-        else:
-            ev = (((iv**2 - rv**2) * T) / 2) * 100
-    except Exception as e:
-        st.error(f"Error computing EV: {e}")
-        ev = np.nan
-    return ev
-
-###########################################
-# NORMALIZATION FOR COMPOSITE SCORE
-###########################################
-def normalize_metrics(metrics):
-    """
-    Normalize a list of numeric metrics to Z-scores.
-    """
-    arr = np.array(metrics)
-    if len(arr) <= 1 or np.std(arr) == 0:
-        return arr
-    return (arr - np.mean(arr)) / np.std(arr)
-
-###########################################
-# SELECT OPTIMAL STRIKE - ADAPTIVE FOR SHORT vs LONG VOL
-###########################################
-def select_optimal_strike(ticker_list, position_side='short'):
-    """
-    Select the optimal strike based on a composite score that adapts for short or long volatility.
-    The composite score is computed from normalized EV, gamma, and open interest.
-    Gamma is penalized for short vol and rewarded for long vol.
-    """
-    if not ticker_list:
-        return None
-
-    if position_side.lower() == 'short':
-        weights = {"ev": 0.5, "gamma": -0.3, "oi": 0.2}
-    else:
-        weights = {"ev": 0.5, "gamma": 0.3, "oi": 0.2}
-
-    ev_list = [item['EV'] for item in ticker_list]
-    gamma_list = [item['gamma'] for item in ticker_list]
-    oi_list = [item['open_interest'] for item in ticker_list]
-    
-    norm_ev = normalize_metrics(ev_list)
-    norm_gamma = normalize_metrics(gamma_list)
-    norm_oi = normalize_metrics(oi_list)
-    
-    best_score = -np.inf
-    best_candidate = None
-    
-    for i, item in enumerate(ticker_list):
-        score = (weights["ev"] * norm_ev[i] +
-                 weights["gamma"] * norm_gamma[i] +
-                 weights["oi"] * norm_oi[i])
-        item["composite_score"] = score
-        if score > best_score:
-            best_score = score
-            best_candidate = item
-            
-    return best_candidate
-
-###########################################
-# COMPOSITE SCORE VISUALIZATION (RAW)
-###########################################
-def compute_composite_score(item, position_side='short'):
-    """
-    Compute a raw composite score for an option instrument for visualization.
-    This raw score is EV adjusted by gamma and open interest (without normalization).
-    """
-    score = item['EV']
-    if item.get('gamma', 0) > 0:
-        if position_side.lower() == "short":
-            score /= item['gamma']
-        else:
-            score *= item['gamma']
-    score += 0.01 * item['open_interest']
-    return score
-
-###########################################
-# VOLATILITY SURFACE ANALYSIS
-###########################################
-def plot_volatility_surface(df, spot_price):
-    """
-    Plot the volatility surface using moneyness and time to expiry.
-    """
-    df = df.copy()
-    df['moneyness'] = df['k'] / spot_price
-    df['T'] = (df['date_time'].max() - df['date_time']).dt.days / 365.0
-    fig = px.scatter_3d(df, x='moneyness', y='T', z='iv_close',
-                        color='option_type', title="Volatility Surface")
-    st.plotly_chart(fig)
-
-###########################################
-# TRANSACTION COST ADJUSTMENT
-###########################################
-def adjust_for_liquidity(ticker_list):
-    """
-    Adjust EV for liquidity by penalizing wide bid-ask spreads.
-    """
-    for item in ticker_list:
-        bid = item.get('bid', 0)
-        ask = item.get('ask', 0)
-        if bid and ask:
-            spread = ask - bid
-            mid = (ask + bid) / 2
-            if mid > 0:
-                item['EV'] *= (1 - spread / mid)
-    return ticker_list
-
-###########################################
-# HISTORICAL BACKTESTING FOR OPTIMAL WEIGHTS
-###########################################
-def load_previous_trades():
-    """
-    Load historical trade data for backtesting.
-    For demonstration, returns a dummy DataFrame.
-    """
-    return pd.DataFrame({
-        'EV': np.random.normal(0, 1, 100),
-        'gamma': np.random.normal(0, 1, 100),
-        'oi': np.random.normal(0, 1, 100),
-        'profit': np.random.normal(0, 1, 100)
-    })
-
-def optimize_weights(historical_data, target='profit', features=['EV', 'gamma', 'oi']):
-    """
-    Optimize weights using linear regression on historical trade data.
-    """
-    X = historical_data[features]
-    y = historical_data[target]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = LinearRegression()
-    model.fit(X_train, y_train)
-    return model.coef_
-
-def recommend_volatility_strategy(atm_iv, rv):
-    """
-    Recommend a volatility strategy based on ATM IV and realized volatility.
-    If ATM IV > RV, return "short"; if ATM IV < RV, return "long"; otherwise "neutral".
-    """
-    if atm_iv > rv:
-        return "short"
-    elif atm_iv < rv:
-        return "long"
-    else:
-        return "neutral"
-
-###########################################
-# DAILY REALIZED VOLATILITY CALCULATION FUNCTIONS
+# REALIZED VOLATILITY CALCULATION FUNCTIONS (30-day)
 ###########################################
 def calculate_btc_annualized_volatility_daily(df):
     """
     Calculates the annualized realized volatility of BTC using the last 30 days
     of daily percentage returns.
     """
-    # Ensure the DataFrame has a 'date_time' column
     if "date_time" not in df.columns:
         if isinstance(df.index, pd.DatetimeIndex):
-            df = df.reset_index()  # Convert index to 'date_time' column
+            df = df.reset_index()  # Convert index to a column named 'date_time'
         else:
             raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
-    # Resample to daily data using the last available close price of each day
     df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
-    # Calculate daily percentage returns
     df_daily["daily_return"] = df_daily["close"].pct_change()
-    # Get the last 30 days of returns
     last_30_returns = df_daily["daily_return"].dropna().tail(30)
     if last_30_returns.empty:
         return np.nan
@@ -585,9 +271,6 @@ def calculate_daily_realized_volatility_series(df):
 # OPTION DELTA, GAMMA, AND GEX CALCULATION FUNCTIONS
 ###########################################
 def compute_delta(row, S):
-    """
-    Compute the Black-Scholes delta for an option using timezone-aware datetimes.
-    """
     try:
         expiry_str = row["instrument_name"].split("-")[1]
         expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
@@ -607,9 +290,6 @@ def compute_delta(row, S):
     return norm.cdf(d1) if row["option_type"] == "C" else norm.cdf(d1) - 1
 
 def compute_gamma(row, S):
-    """
-    Compute the Black-Scholes gamma for an option using timezone-aware datetimes.
-    """
     try:
         expiry_str = row["instrument_name"].split("-")[1]
         expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
@@ -630,9 +310,6 @@ def compute_gamma(row, S):
     return gamma
 
 def compute_gex(row, S, oi):
-    """
-    Compute Gamma Exposure (GEX) for an option, scaled for interpretability.
-    """
     gamma = compute_gamma(row, S)
     if gamma is None or np.isnan(gamma):
         return np.nan
@@ -642,11 +319,6 @@ def compute_gex(row, S, oi):
 # REALIZED VOLATILITY - EV CALCULATION FUNCTIONS
 ###########################################
 def compute_ev(iv, rv, T, position_side="short"):
-    """
-    Compute the Expected Value (EV) for an option strategy.
-    For short volatility: EV = (((iv^2 - rv^2) * T) / 2) * 100
-    For long volatility: EV = (((rv^2 - iv^2) * T) / 2) * 100
-    """
     try:
         if position_side.lower() == "short":
             ev = (((iv**2 - rv**2) * T) / 2) * 100
@@ -663,9 +335,6 @@ def compute_ev(iv, rv, T, position_side="short"):
 # NORMALIZATION FOR COMPOSITE SCORE
 ###########################################
 def normalize_metrics(metrics):
-    """
-    Normalize a list of numeric metrics to Z-scores.
-    """
     arr = np.array(metrics)
     if len(arr) <= 1 or np.std(arr) == 0:
         return arr
@@ -675,30 +344,20 @@ def normalize_metrics(metrics):
 # SELECT OPTIMAL STRIKE - ADAPTIVE FOR SHORT vs LONG VOL
 ###########################################
 def select_optimal_strike(ticker_list, position_side='short'):
-    """
-    Select the optimal strike based on a composite score that adapts for short or long volatility.
-    The composite score is computed from normalized EV, gamma, and open interest.
-    Gamma is penalized for short vol and rewarded for long vol.
-    """
     if not ticker_list:
         return None
-
     if position_side.lower() == 'short':
         weights = {"ev": 0.5, "gamma": -0.3, "oi": 0.2}
     else:
         weights = {"ev": 0.5, "gamma": 0.3, "oi": 0.2}
-
     ev_list = [item['EV'] for item in ticker_list]
     gamma_list = [item['gamma'] for item in ticker_list]
     oi_list = [item['open_interest'] for item in ticker_list]
-    
     norm_ev = normalize_metrics(ev_list)
     norm_gamma = normalize_metrics(gamma_list)
     norm_oi = normalize_metrics(oi_list)
-    
     best_score = -np.inf
     best_candidate = None
-    
     for i, item in enumerate(ticker_list):
         score = (weights["ev"] * norm_ev[i] +
                  weights["gamma"] * norm_gamma[i] +
@@ -707,17 +366,12 @@ def select_optimal_strike(ticker_list, position_side='short'):
         if score > best_score:
             best_score = score
             best_candidate = item
-            
     return best_candidate
 
 ###########################################
 # COMPOSITE SCORE VISUALIZATION (RAW)
 ###########################################
 def compute_composite_score(item, position_side='short'):
-    """
-    Compute a raw composite score for an option instrument for visualization.
-    This raw score is EV adjusted by gamma and open interest (without normalization).
-    """
     score = item['EV']
     if item.get('gamma', 0) > 0:
         if position_side.lower() == "short":
@@ -731,9 +385,6 @@ def compute_composite_score(item, position_side='short'):
 # VOLATILITY SURFACE ANALYSIS
 ###########################################
 def plot_volatility_surface(df, spot_price):
-    """
-    Plot the volatility surface using moneyness and time to expiry.
-    """
     df = df.copy()
     df['moneyness'] = df['k'] / spot_price
     df['T'] = (df['date_time'].max() - df['date_time']).dt.days / 365.0
@@ -745,9 +396,6 @@ def plot_volatility_surface(df, spot_price):
 # TRANSACTION COST ADJUSTMENT
 ###########################################
 def adjust_for_liquidity(ticker_list):
-    """
-    Adjust EV for liquidity by penalizing wide bid-ask spreads.
-    """
     for item in ticker_list:
         bid = item.get('bid', 0)
         ask = item.get('ask', 0)
@@ -762,10 +410,6 @@ def adjust_for_liquidity(ticker_list):
 # HISTORICAL BACKTESTING FOR OPTIMAL WEIGHTS
 ###########################################
 def load_previous_trades():
-    """
-    Load historical trade data for backtesting.
-    For demonstration, returns a dummy DataFrame.
-    """
     return pd.DataFrame({
         'EV': np.random.normal(0, 1, 100),
         'gamma': np.random.normal(0, 1, 100),
@@ -774,9 +418,6 @@ def load_previous_trades():
     })
 
 def optimize_weights(historical_data, target='profit', features=['EV', 'gamma', 'oi']):
-    """
-    Optimize weights using linear regression on historical trade data.
-    """
     X = historical_data[features]
     y = historical_data[target]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -785,10 +426,6 @@ def optimize_weights(historical_data, target='profit', features=['EV', 'gamma', 
     return model.coef_
 
 def recommend_volatility_strategy(atm_iv, rv):
-    """
-    Recommend a volatility strategy based on ATM IV and realized volatility.
-    If ATM IV > RV, return "short"; if ATM IV < RV, return "long"; otherwise "neutral".
-    """
     if atm_iv > rv:
         return "short"
     elif atm_iv < rv:
@@ -797,23 +434,20 @@ def recommend_volatility_strategy(atm_iv, rv):
         return "neutral"
 
 ###########################################
-# DAILY REALIZED VOLATILITY CALCULATION FUNCTIONS
+# MAIN DAILY REALIZED VOLATILITY FUNCTIONS
 ###########################################
 def calculate_btc_annualized_volatility_daily(df):
     """
-    Calculates the annualized realized volatility of BTC using the last 30 days of daily percentage returns.
+    Calculates the annualized realized volatility of BTC using the last 30 days
+    of daily percentage returns.
     """
-    # Ensure the DataFrame has a 'date_time' column
     if "date_time" not in df.columns:
         if isinstance(df.index, pd.DatetimeIndex):
-            df = df.reset_index()  # Convert the index to a column named 'date_time'
+            df = df.reset_index() 
         else:
             raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
-    # Resample to daily data using the last available close price of each day
     df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
-    # Calculate daily percentage returns
     df_daily["daily_return"] = df_daily["close"].pct_change()
-    # Get the last 30 days of returns
     last_30_returns = df_daily["daily_return"].dropna().tail(30)
     if last_30_returns.empty:
         return np.nan
@@ -840,9 +474,6 @@ def calculate_daily_realized_volatility_series(df):
 # OPTION DELTA, GAMMA, AND GEX CALCULATION FUNCTIONS
 ###########################################
 def compute_delta(row, S):
-    """
-    Compute the Black-Scholes delta for an option using timezone-aware datetimes.
-    """
     try:
         expiry_str = row["instrument_name"].split("-")[1]
         expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
@@ -854,7 +485,7 @@ def compute_delta(row, S):
         T = 0.0001
     K = row["k"]
     sigma = row["iv_close"]
-    sigma_eff = sigma  # You can adjust sigma here if needed
+    sigma_eff = sigma
     try:
         d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
     except Exception:
@@ -862,9 +493,6 @@ def compute_delta(row, S):
     return norm.cdf(d1) if row["option_type"] == "C" else norm.cdf(d1) - 1
 
 def compute_gamma(row, S):
-    """
-    Compute the Black-Scholes gamma for an option using timezone-aware datetimes.
-    """
     try:
         expiry_str = row["instrument_name"].split("-")[1]
         expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
@@ -876,7 +504,7 @@ def compute_gamma(row, S):
         return np.nan
     K = row["k"]
     sigma = row["iv_close"]
-    sigma_eff = sigma  # Adjust if needed
+    sigma_eff = sigma
     try:
         d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
     except Exception:
@@ -885,9 +513,6 @@ def compute_gamma(row, S):
     return gamma
 
 def compute_gex(row, S, oi):
-    """
-    Compute Gamma Exposure (GEX) for an option, scaled for interpretability.
-    """
     gamma = compute_gamma(row, S)
     if gamma is None or np.isnan(gamma):
         return np.nan
@@ -897,11 +522,6 @@ def compute_gex(row, S, oi):
 # REALIZED VOLATILITY - EV CALCULATION FUNCTIONS
 ###########################################
 def compute_ev(iv, rv, T, position_side="short"):
-    """
-    Compute the Expected Value (EV) for an option strategy.
-    For short volatility: EV = (((iv^2 - rv^2) * T) / 2) * 100
-    For long volatility: EV = (((rv^2 - iv^2) * T) / 2) * 100
-    """
     try:
         if position_side.lower() == "short":
             ev = (((iv**2 - rv**2) * T) / 2) * 100
@@ -918,9 +538,6 @@ def compute_ev(iv, rv, T, position_side="short"):
 # NORMALIZATION FOR COMPOSITE SCORE
 ###########################################
 def normalize_metrics(metrics):
-    """
-    Normalize a list of numeric metrics to Z-scores.
-    """
     arr = np.array(metrics)
     if len(arr) <= 1 or np.std(arr) == 0:
         return arr
@@ -930,30 +547,20 @@ def normalize_metrics(metrics):
 # SELECT OPTIMAL STRIKE - ADAPTIVE FOR SHORT vs LONG VOL
 ###########################################
 def select_optimal_strike(ticker_list, position_side='short'):
-    """
-    Select the optimal strike based on a composite score that adapts for short or long volatility.
-    The composite score is computed from normalized EV, gamma, and open interest.
-    Gamma is penalized for short vol and rewarded for long vol.
-    """
     if not ticker_list:
         return None
-
     if position_side.lower() == 'short':
         weights = {"ev": 0.5, "gamma": -0.3, "oi": 0.2}
     else:
         weights = {"ev": 0.5, "gamma": 0.3, "oi": 0.2}
-
     ev_list = [item['EV'] for item in ticker_list]
     gamma_list = [item['gamma'] for item in ticker_list]
     oi_list = [item['open_interest'] for item in ticker_list]
-    
     norm_ev = normalize_metrics(ev_list)
     norm_gamma = normalize_metrics(gamma_list)
     norm_oi = normalize_metrics(oi_list)
-    
     best_score = -np.inf
     best_candidate = None
-    
     for i, item in enumerate(ticker_list):
         score = (weights["ev"] * norm_ev[i] +
                  weights["gamma"] * norm_gamma[i] +
@@ -962,17 +569,12 @@ def select_optimal_strike(ticker_list, position_side='short'):
         if score > best_score:
             best_score = score
             best_candidate = item
-            
     return best_candidate
 
 ###########################################
 # COMPOSITE SCORE VISUALIZATION (RAW)
 ###########################################
 def compute_composite_score(item, position_side='short'):
-    """
-    Compute a raw composite score for an option instrument for visualization.
-    This raw score is EV adjusted by gamma and open interest (without normalization).
-    """
     score = item['EV']
     if item.get('gamma', 0) > 0:
         if position_side.lower() == "short":
@@ -986,9 +588,6 @@ def compute_composite_score(item, position_side='short'):
 # VOLATILITY SURFACE ANALYSIS
 ###########################################
 def plot_volatility_surface(df, spot_price):
-    """
-    Plot the volatility surface using moneyness and time to expiry.
-    """
     df = df.copy()
     df['moneyness'] = df['k'] / spot_price
     df['T'] = (df['date_time'].max() - df['date_time']).dt.days / 365.0
@@ -1000,9 +599,6 @@ def plot_volatility_surface(df, spot_price):
 # TRANSACTION COST ADJUSTMENT
 ###########################################
 def adjust_for_liquidity(ticker_list):
-    """
-    Adjust EV for liquidity by penalizing wide bid-ask spreads.
-    """
     for item in ticker_list:
         bid = item.get('bid', 0)
         ask = item.get('ask', 0)
@@ -1017,10 +613,6 @@ def adjust_for_liquidity(ticker_list):
 # HISTORICAL BACKTESTING FOR OPTIMAL WEIGHTS
 ###########################################
 def load_previous_trades():
-    """
-    Load historical trade data for backtesting.
-    For demonstration, returns a dummy DataFrame.
-    """
     return pd.DataFrame({
         'EV': np.random.normal(0, 1, 100),
         'gamma': np.random.normal(0, 1, 100),
@@ -1029,9 +621,6 @@ def load_previous_trades():
     })
 
 def optimize_weights(historical_data, target='profit', features=['EV', 'gamma', 'oi']):
-    """
-    Optimize weights using linear regression on historical trade data.
-    """
     X = historical_data[features]
     y = historical_data[target]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -1040,10 +629,6 @@ def optimize_weights(historical_data, target='profit', features=['EV', 'gamma', 
     return model.coef_
 
 def recommend_volatility_strategy(atm_iv, rv):
-    """
-    Recommend a volatility strategy based on ATM IV and realized volatility.
-    If ATM IV > RV, return "short"; if ATM IV < RV, return "long"; otherwise "neutral".
-    """
     if atm_iv > rv:
         return "short"
     elif atm_iv < rv:
@@ -1059,17 +644,13 @@ def calculate_btc_annualized_volatility_daily(df):
     Calculates the annualized realized volatility of BTC using the last 30 days
     of daily percentage returns.
     """
-    # Ensure the DataFrame has a 'date_time' column
     if "date_time" not in df.columns:
         if isinstance(df.index, pd.DatetimeIndex):
-            df = df.reset_index()  # Convert the index to a column named 'date_time'
+            df = df.reset_index() 
         else:
             raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
-    # Resample to daily data using the last available close price of each day
     df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
-    # Calculate daily percentage returns
     df_daily["daily_return"] = df_daily["close"].pct_change()
-    # Get the last 30 days of returns
     last_30_returns = df_daily["daily_return"].dropna().tail(30)
     if last_30_returns.empty:
         return np.nan
@@ -1103,7 +684,6 @@ def main():
         st.session_state.logged_in = False
         st.stop()
     
-    # Expiry Date Selection
     current_date = dt.datetime.now()
     valid_days = get_valid_expiration_options(current_date)
     selected_day = st.sidebar.selectbox("Choose Expiration Day", options=valid_days)
@@ -1116,7 +696,6 @@ def main():
     T_YEARS = days_to_expiry / 365.0
     st.sidebar.markdown(f"**Using Expiration Date:** {expiry_str}")
     
-    # Deviation Range Selection
     deviation_option = st.sidebar.select_slider(
         "Choose Deviation Range",
         options=["1 Standard Deviation (68.2%)", "2 Standard Deviations (95.4%)"],
@@ -1132,13 +711,11 @@ def main():
     spot_price = df_kraken["close"].iloc[-1]
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
     
-    # Compute Realized Volatility using the daily returns method (last 30 days)
-    # Resample Kraken data to daily frequency using the last close price of each day
-    df_daily = df_kraken.resample('D', on='date_time').last()
+    # Resample Kraken data to daily frequency using the index (since 'date_time' is the index)
+    df_daily = df_kraken.resample('D').last()
     rv = calculate_btc_annualized_volatility_daily(df_daily)
     st.write(f"Computed Realized Volatility (annualized, 30-day): {rv:.4f}")
     
-    # Fetch instruments and compute ATM IV for strategy recommendation
     instruments_list = fetch_instruments()
     calls_all = get_option_instruments(instruments_list, "C", expiry_str)
     atm_iv = get_atm_iv(calls_all, spot_price)
@@ -1156,12 +733,10 @@ def main():
     else:
         st.write("Reason: ATM IV and RV are approximately equal.")
     
-    # Volatility Strategy Selection (Manual Override)
     position_side = st.sidebar.selectbox("Volatility Strategy", ["short", "long"],
                                            index=0 if recommended_strategy=="short" else 1)
     st.sidebar.write(f"Selected strategy: {position_side}")
     
-    # Filter Instruments Based on Theoretical Range
     try:
         filtered_calls, filtered_puts = get_filtered_instruments(spot_price, expiry_str, T_YEARS, multiplier)
     except Exception as e:
@@ -1193,7 +768,7 @@ def main():
     preliminary_ticker_list = []
     for instrument in all_instruments:
         ticker_data = fetch_ticker(instrument)
-        if not (ticker_data and "open_interest" in ticker_data):
+        if not ticker_data or "open_interest" not in ticker_data:
             continue
         try:
             strike = int(instrument.split("-")[2])
@@ -1214,7 +789,6 @@ def main():
     global ticker_list
     ticker_list = build_ticker_list(all_instruments, spot_price, T_YEARS, smile_df)
     
-    # For historical VRP, compute a daily realized volatility series
     daily_rv_series = calculate_daily_realized_volatility_series(df_kraken)
     daily_rv = daily_rv_series.tolist()
     daily_iv = compute_daily_average_iv(df_iv_agg)
