@@ -419,6 +419,306 @@ def build_ticker_list(all_instruments, spot, T, smile_df, rv=0.0, position_side=
     return ticker_list
 
 ###########################################
+# EV Strategy Functions
+###########################################
+def calculate_atm_straddle_ev(ticker_list, spot, T, rv, position_side="short"):
+    tolerance = spot * 0.02
+    atm_candidates = [item for item in ticker_list if abs(item["strike"] - spot) <= tolerance]
+    if not atm_candidates:
+        return pd.DataFrame()
+    return pd.DataFrame(sorted(atm_candidates, key=lambda x: x["EV"], reverse=True))
+
+def calculate_limited_otm_put_ev(ticker_list, spot, T, rv, position_side="long"):
+    tolerance = spot * 0.10
+    candidates = [item for item in ticker_list if item["option_type"] == "P" and (spot - item["strike"]) <= tolerance]
+    if not candidates:
+        return pd.DataFrame()
+    return pd.DataFrame(sorted(candidates, key=lambda x: x["EV"], reverse=True))
+
+def calculate_call_spread_ev(ticker_list, spot, T, rv, position_side="short"):
+    tolerance = spot * 0.10
+    candidates = [item for item in ticker_list if item["option_type"] == "C" and (item["strike"] - spot) <= tolerance]
+    if not candidates:
+        return pd.DataFrame()
+    return pd.DataFrame(sorted(candidates, key=lambda x: x["EV"], reverse=True))
+
+def calculate_strangle_ev(ticker_list, spot, T, rv, position_side="short"):
+    tolerance = spot * 0.10
+    candidates = [item for item in ticker_list if ((item["option_type"] == "C" and (item["strike"] - spot) <= tolerance) or
+                                                   (item["option_type"] == "P" and (spot - item["strike"]) <= tolerance))]
+    if not candidates:
+        return pd.DataFrame()
+    return pd.DataFrame(sorted(candidates, key=lambda x: x["EV"], reverse=True))
+
+def calculate_naked_call_ev(ticker_list, spot, T, rv, position_side="short"):
+    candidates = [item for item in ticker_list if item["option_type"] == "C" and item["strike"] > spot]
+    if not candidates:
+        return pd.DataFrame()
+    return pd.DataFrame(sorted(candidates, key=lambda x: x["EV"], reverse=True))
+
+def calculate_small_atm_straddle_ev(ticker_list, spot, T, rv, position_side="short"):
+    # For small ATM straddle, we can use the same logic as atm straddle
+    return calculate_atm_straddle_ev(ticker_list, spot, T, rv, position_side)
+
+###########################################
+# Composite Score Calculation
+###########################################
+def normalize_metrics(metrics):
+    arr = np.array(metrics)
+    if len(arr) <= 1 or np.std(arr) == 0:
+        return arr
+    return (arr - np.mean(arr)) / np.std(arr)
+
+def compute_composite_scores(ticker_list, position_side='short'):
+    for item in ticker_list:
+        if 'gex' not in item:
+            item['gex'] = 0
+    ev_list = [item['EV'] for item in ticker_list]
+    gex_list = [item.get('gex', 0) for item in ticker_list]
+    oi_list = [item['open_interest'] for item in ticker_list]
+    
+    norm_ev = normalize_metrics(ev_list)
+    norm_gex = normalize_metrics(gex_list)
+    norm_oi = normalize_metrics(oi_list)
+    
+    weights = {"ev": 0.5, "gex": (-0.3 if position_side.lower() == 'short' else 0.3), "oi": 0.2}
+    
+    for i, item in enumerate(ticker_list):
+        composite_score = (weights["ev"] * norm_ev[i] +
+                           weights["gex"] * norm_gex[i] +
+                           weights["oi"] * norm_oi[i])
+        item["composite_score"] = composite_score
+        item["strategy"] = position_side.capitalize()
+    return ticker_list
+
+###########################################
+# Build Smile DataFrame
+###########################################
+def build_smile_df(ticker_list):
+    df = pd.DataFrame(ticker_list)
+    df = df.dropna(subset=["iv"])
+    smile_df = df.groupby("strike", as_index=False)["iv"].mean()
+    smile_df.rename(columns={"iv": "iv"}, inplace=True)
+    return smile_df
+
+###########################################
+# Trade Strategy Evaluation
+###########################################
+def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
+                            historical_vols=None, historical_vrps=None, expiry_date=None):
+    current_date = dt.datetime.now()
+    days_to_expiration = (expiry_date - current_date).days if expiry_date else 7
+    rv_vol = calculate_btc_annualized_volatility_daily(df_kraken)
+    iv_vol = df["iv_close"].mean() if not df.empty else np.nan
+    rv_var = rv_vol ** 2 if not pd.isna(rv_vol) else np.nan
+    iv_var = iv_vol ** 2 if not pd.isna(iv_vol) else np.nan
+    current_vrp = iv_var - rv_var if (not pd.isna(iv_vol) and not pd.isna(rv_vol)) else np.nan
+    divergence = abs(iv_vol - rv_vol) / rv_vol if (rv_vol != 0 and not pd.isna(iv_vol)) else np.nan
+    if not np.isnan(divergence) and divergence > 0.20:
+        st.write(f"Alert: IV and RV diverge by {divergence * 100:.2f}% (threshold: 20%).")
+    
+    df_iv_agg = df.groupby("date_time")["iv_close"].mean().to_frame(name="iv_mean")
+    df_iv_agg.index = pd.to_datetime(df_iv_agg.index)
+    df_iv_agg = df_iv_agg.resample("5min").mean().ffill().sort_index()
+    df_iv_agg["iv_rolling_mean"] = df_iv_agg["iv_mean"].rolling("1D").mean()
+    df_iv_agg["iv_rolling_std"] = df_iv_agg["iv_mean"].rolling("1D").std()
+    df_iv_agg["upper_zone"] = df_iv_agg["iv_rolling_mean"] + df_iv_agg["iv_rolling_std"]
+    df_iv_agg["lower_zone"] = df_iv_agg["iv_rolling_mean"] - df_iv_agg["iv_rolling_std"]
+    latest_iv = df_iv_agg["iv_mean"].iloc[-1]
+    latest_upper = df_iv_agg["upper_zone"].iloc[-1]
+    latest_lower = df_iv_agg["lower_zone"].iloc[-1]
+    if latest_iv > latest_upper:
+        market_regime = "Risk-Off"
+    elif latest_iv < latest_lower:
+        market_regime = "Risk-On"
+    else:
+        market_regime = "Neutral"
+    vol_regime = market_regime
+    vrp_regime = classify_vrp_regime(current_vrp, historical_vrps) if historical_vrps and len(historical_vrps) > 0 else "Neutral"
+    
+    call_items = [item for item in ticker_list if item["option_type"] == "C"]
+    put_items = [item for item in ticker_list if item["option_type"] == "P"]
+    call_oi_total = sum(item["open_interest"] for item in call_items)
+    put_oi_total = sum(item["open_interest"] for item in put_items)
+    avg_call_delta = (sum(item["delta"] * item["open_interest"] for item in call_items) / call_oi_total) if call_oi_total > 0 else 0
+    avg_put_delta = (sum(item["delta"] * item["open_interest"] for item in put_items) / put_oi_total) if put_oi_total > 0 else 0
+    
+    df_ticker = pd.DataFrame(ticker_list) if ticker_list else pd.DataFrame()
+    call_oi = df_ticker[df_ticker["option_type"] == "C"]["open_interest"].sum() if not df_ticker.empty else 0
+    put_oi = df_ticker[df_ticker["option_type"] == "P"]["open_interest"].sum() if not df_ticker.empty else 0
+    put_call_ratio = put_oi / call_oi if call_oi > 0 else np.inf
+
+    df_calls = df[df["option_type"] == "C"].copy()
+    df_puts = df[df["option_type"] == "P"].copy()
+    if "gamma" not in df_calls.columns:
+        df_calls["gamma"] = df_calls.apply(lambda row: compute_delta(row, spot_price), axis=1)
+    if "gamma" not in df_puts.columns:
+        df_puts["gamma"] = df_puts.apply(lambda row: compute_delta(row, spot_price), axis=1)
+    avg_call_gamma = df_calls["gamma"].mean() if not df_calls.empty else 0
+    avg_put_gamma = df_puts["gamma"].mean() if not df_puts.empty else 0
+    
+    if vrp_regime == "Long Volatility":
+        if risk_tolerance == "Conservative":
+            recommendation = "Long Volatility (Conservative): Buy limited OTM Puts"
+            position = "Limited OTM Puts"
+            hedge_action = "Hedge lightly with BTC futures short"
+        elif risk_tolerance == "Moderate":
+            recommendation = "Long Volatility (Neutral): Consider delta-hedged straddles"
+            position = "ATM Straddle"
+            hedge_action = "Implement dynamic delta hedging"
+        else:
+            recommendation = "Long Volatility (Aggressive): Take leveraged long volatility positions"
+            position = "Leveraged Long Straddle"
+            hedge_action = "Aggressively hedge using BTC futures"
+    elif vrp_regime == "Short Volatility":
+        if risk_tolerance == "Conservative":
+            recommendation = "Short Volatility (Conservative): Sell a small number of call spreads"
+            position = "Call Spread"
+            hedge_action = "Hedge by buying BTC futures"
+        elif risk_tolerance == "Moderate":
+            recommendation = "Short Volatility (Neutral): Sell strangles with tight stops"
+            position = "Strangle"
+            hedge_action = "Monitor and adjust hedge dynamically"
+        else:
+            recommendation = "Short Volatility (Aggressive): Consider naked call selling"
+            position = "Naked Calls"
+            hedge_action = "Aggressively hedge with BTC futures"
+    else:
+        recommendation = "Gamma Scalping (Neutral): Consider buying small ATM straddles"
+        position = "Small ATM Straddle"
+        hedge_action = "Implement light delta hedging"
+    
+    return {
+        "recommendation": recommendation,
+        "position": position,
+        "hedge_action": hedge_action,
+        "iv": iv_vol,
+        "rv": rv_vol,
+        "vol_regime": vol_regime,
+        "vrp_regime": vrp_regime,
+        "put_call_ratio": put_call_ratio,
+        "avg_call_delta": avg_call_delta,
+        "avg_put_delta": avg_put_delta,
+        "avg_call_gamma": avg_call_gamma,
+        "avg_put_gamma": avg_put_gamma
+    }
+
+def classify_vrp_regime(current_vrp, historical_vrps):
+    percentile = percentileofscore(historical_vrps, current_vrp)
+    if current_vrp < 0:
+        return "Long Volatility"
+    elif percentile > 75:
+        return "Short Volatility"
+    elif percentile < 25:
+        return "Long Volatility"
+    else:
+        return "Neutral"
+
+###########################################
+# Visualization Functions
+###########################################
+def plot_gamma_heatmap(df):
+    st.subheader("Gamma Heatmap by Strike and Time")
+    fig_gamma_heatmap = px.density_heatmap(
+        df,
+        x="date_time",
+        y="k",
+        z="gamma",
+        color_continuous_scale="Viridis",
+        title="Gamma by Strike Over Time"
+    )
+    fig_gamma_heatmap.update_layout(height=400, width=800)
+    st.plotly_chart(fig_gamma_heatmap, use_container_width=True)
+
+def plot_gex_by_strike(df_gex):
+    st.subheader("Gamma Exposure (GEX) by Strike")
+    fig_gex = px.bar(
+        df_gex,
+        x="strike",
+        y="gex",
+        color="option_type",
+        title="Gamma Exposure (GEX) by Strike",
+        labels={"gex": "GEX", "strike": "Strike Price"}
+    )
+    fig_gex.update_layout(height=400, width=800)
+    st.plotly_chart(fig_gex, use_container_width=True)
+
+def plot_net_gex(df_gex, spot_price):
+    st.subheader("Net Gamma Exposure by Strike")
+    df_gex_net = df_gex.groupby("strike").apply(
+        lambda x: x.loc[x["option_type"] == "C", "gex"].sum() - x.loc[x["option_type"] == "P", "gex"].sum()
+    ).reset_index(name="net_gex")
+    df_gex_net["sign"] = df_gex_net["net_gex"].apply(lambda val: "Negative" if val < 0 else "Positive")
+    fig_net_gex = px.bar(
+        df_gex_net,
+        x="strike",
+        y="net_gex",
+        color="sign",
+        title="Net Gamma Exposure (Calls GEX - Puts GEX)",
+        labels={"net_gex": "Net GEX", "strike": "Strike Price"}
+    )
+    fig_net_gex.add_hline(y=0, line_dash="dash", line_color="red")
+    fig_net_gex.add_vline(
+        x=spot_price,
+        line_dash="dash",
+        line_color="lightgrey",
+        annotation_text=f"Spot {spot_price:.0f}",
+        annotation_position="top right"
+    )
+    fig_net_gex.update_layout(height=400, width=800)
+    st.plotly_chart(fig_net_gex, use_container_width=True)
+
+def classify_volatility_regime(current_vol, historical_vols):
+    percentile = percentileofscore(historical_vols, current_vol)
+    if percentile < 5:
+        return "Low Volatility"
+    elif percentile > 95:
+        return "High Volatility"
+    else:
+        return "Medium Volatility"
+
+###########################################
+# EV Strategy Functions
+###########################################
+def calculate_atm_straddle_ev(ticker_list, spot, T, rv, position_side="short"):
+    tolerance = spot * 0.02
+    atm_candidates = [item for item in ticker_list if abs(item["strike"] - spot) <= tolerance]
+    if not atm_candidates:
+        return pd.DataFrame()
+    return pd.DataFrame(sorted(atm_candidates, key=lambda x: x["EV"], reverse=True))
+
+def calculate_limited_otm_put_ev(ticker_list, spot, T, rv, position_side="long"):
+    tolerance = spot * 0.10
+    candidates = [item for item in ticker_list if item["option_type"] == "P" and (spot - item["strike"]) <= tolerance]
+    if not candidates:
+        return pd.DataFrame()
+    return pd.DataFrame(sorted(candidates, key=lambda x: x["EV"], reverse=True))
+
+def calculate_call_spread_ev(ticker_list, spot, T, rv, position_side="short"):
+    tolerance = spot * 0.10
+    candidates = [item for item in ticker_list if item["option_type"] == "C" and (item["strike"] - spot) <= tolerance]
+    if not candidates:
+        return pd.DataFrame()
+    return pd.DataFrame(sorted(candidates, key=lambda x: x["EV"], reverse=True))
+
+def calculate_strangle_ev(ticker_list, spot, T, rv, position_side="short"):
+    tolerance = spot * 0.10
+    candidates = [item for item in ticker_list if ((item["option_type"] == "C" and (item["strike"] - spot) <= tolerance) or
+                                                   (item["option_type"] == "P" and (spot - item["strike"]) <= tolerance))]
+    if not candidates:
+        return pd.DataFrame()
+    return pd.DataFrame(sorted(candidates, key=lambda x: x["EV"], reverse=True))
+
+def calculate_naked_call_ev(ticker_list, spot, T, rv, position_side="short"):
+    candidates = [item for item in ticker_list if item["option_type"] == "C" and item["strike"] > spot]
+    if not candidates:
+        return pd.DataFrame()
+    return pd.DataFrame(sorted(candidates, key=lambda x: x["EV"], reverse=True))
+
+def calculate_small_atm_straddle_ev(ticker_list, spot, T, rv, position_side="short"):
+    return calculate_atm_straddle_ev(ticker_list, spot, T, rv, position_side)
+
+###########################################
 # Composite Score Calculation
 ###########################################
 def normalize_metrics(metrics):
@@ -797,7 +1097,7 @@ def main():
         df_ev_clean = df_ev.dropna(subset=["EV"])
         if not df_ev_clean.empty:
             best_candidate = df_ev_clean.loc[df_ev_clean["EV"].idxmax()]
-            best_strike = best_candidate["Strike"]
+            best_strike = best_candidate["strike"]
             st.write("Candidate Strikes and their Expected Value (EV):")
             st.dataframe(df_ev_clean)
             st.write(f"Recommended Strike based on highest EV: {best_strike}")
