@@ -6,3 +6,4 @@ ccxt
 toolz
 plotly
 scipy
+sklearn
