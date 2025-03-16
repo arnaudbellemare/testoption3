@@ -556,14 +556,14 @@ def build_ticker_list(all_instruments, spot, T, smile_df):
             "instrument": instrument,
             "strike": strike,
             "option_type": option_type,
-            "open_interest": ticker_data["open_interest"],
+            "open_interest": ticker_data.get("open_interest", 0),
             "delta": delta_est,
             "iv": adjusted_iv
         })
     return ticker_list
 
 ###########################################
-# MAIN DASHBOARD FUNCTION
+# Main Dashboard Function
 ###########################################
 def main():
     login()
@@ -617,13 +617,13 @@ def main():
     if df.empty:
         st.error("No data fetched from Thalex. Please check the API or instrument names.")
         return
-
-    # Ensure 'open_interest' exists in df; if missing, fill with zeros.
-    if "open_interest" not in df.columns:
-        df["open_interest"] = 0
-
+    
     df_calls = df[df["option_type"] == "C"].copy().sort_values("date_time")
     df_puts = df[df["option_type"] == "P"].copy().sort_values("date_time")
+    
+    # Ensure 'open_interest' column exists in df (set to 0 if missing)
+    if "open_interest" not in df.columns:
+        df["open_interest"] = 0
     
     df_iv_agg = (df.groupby("date_time", as_index=False)["iv_close"]
                  .mean().rename(columns={"iv_close": "iv_mean"}))
@@ -653,12 +653,12 @@ def main():
             "instrument": instrument,
             "strike": strike,
             "option_type": option_type,
-            "open_interest": ticker_data["open_interest"],
+            "open_interest": ticker_data.get("open_interest", 0),
             "iv": raw_iv
         })
     smile_df = build_smile_df(preliminary_ticker_list)
     
-    # Define position_side based on a recommended strategy (here using first filtered call's IV as proxy)
+    # Define position_side from recommended strategy
     recommended_strategy = recommend_volatility_strategy(get_actual_iv(filtered_calls[0]), 
                                                          calculate_btc_annualized_volatility_daily(df_kraken))
     position_side = st.sidebar.selectbox("Volatility Strategy", ["short", "long"],
@@ -696,9 +696,6 @@ def main():
         rv_vol = calculate_btc_annualized_volatility_daily(df)
         vol_regime = "Risk-On" if iv_vol < rv_vol else "Risk-Off"
         vrp_regime = "Long Volatility" if (iv_vol**2 - rv_vol**2) < 0 else "Short Volatility"
-        # Ensure open_interest exists
-        if "open_interest" not in df.columns:
-            df["open_interest"] = 0
         put_oi = df[df["option_type"]=="P"]["open_interest"].sum() if not df.empty else 0
         call_oi = df[df["option_type"]=="C"]["open_interest"].sum() if not df.empty else 0
         put_call_ratio = put_oi / call_oi if call_oi > 0 else np.inf
@@ -745,11 +742,10 @@ def main():
     
     rv_series = calculate_daily_realized_volatility_series(df_kraken)
     rv_scalar = rv_series.iloc[-1] if not rv_series.empty else np.nan
-    position = trade_decision['position']
     st.write("EV analysis not fully implemented in this demo.")
     
-    # Determine futures hedge for the straddle (placeholder net delta computation)
-    straddle_delta = 0  # In practice, compute net delta from your straddle position.
+    # Determine Futures Hedge for the Straddle (placeholder net delta)
+    straddle_delta = 0  # Placeholder: replace with your net straddle delta calculation
     if straddle_delta > 0:
         futures_action = "Short Futures (delta -1)"
         futures_contracts = abs(straddle_delta)
@@ -782,6 +778,12 @@ def main():
                                 annotation_text=f"Price: {spot_price:.2f}", annotation_position="bottom left")
         fig_vol_smile.update_layout(height=400, width=600)
         st.plotly_chart(fig_vol_smile, use_container_width=True)
+        
+        # Before plotting gamma heatmap, ensure gamma is computed.
+        if "gamma" not in df_calls.columns:
+            df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
+        if "gamma" not in df_puts.columns:
+            df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
         def plot_gamma_heatmap(df):
             st.subheader("Gamma Heatmap by Strike and Time")
             fig = px.density_heatmap(df, x="date_time", y="k", z="gamma",
