@@ -267,14 +267,14 @@ def compute_ev(iv, rv, T, position_side="short"):
     For long volatility:
       EV = (((rv^2 - iv^2) * T) / 2) * 100
       
-    This ensures a positive EV indicates a favorable condition for the respective strategy.
+    This ensures that a positive EV indicates a favorable condition for the respective strategy.
     """
     if position_side.lower() == "short":
         ev = (((iv**2 - rv**2) * T) / 2) * 100
     elif position_side.lower() == "long":
         ev = (((rv**2 - iv**2) * T) / 2) * 100
     else:
-        ev = (((iv**2 - rv**2) * T) / 2) * 100  # default to short volatility calculation
+        ev = (((iv**2 - rv**2) * T) / 2) * 100  # default to short volatility
     return ev
 
 ###########################################
@@ -339,7 +339,7 @@ def select_optimal_strike(ticker_list, strategy='EV', position_side='short'):
       - Open Interest: Add a liquidity bonus.
       - Fallback to delta proximity (prefer near-the-money).
     
-    This function reflects recommendations from research and expert insights.
+    This heuristic approach reflects recommendations from option theory research.
     """
     best_score = -np.inf
     best_candidate = None
@@ -349,8 +349,7 @@ def select_optimal_strike(ticker_list, strategy='EV', position_side='short'):
         # Use computed EV as primary metric.
         if 'EV' in item and item['EV'] is not None:
             score = item['EV']
-            if position_side.lower() == "long":
-                score = score  # Already computed for long vol
+            # For long volatility, the EV is computed differently so no sign flip is needed.
         else:
             # Fallback: Favor near-the-money options.
             score = 1 - abs(item.get('delta', 0) - 0.5)
@@ -371,6 +370,31 @@ def select_optimal_strike(ticker_list, strategy='EV', position_side='short'):
             best_candidate = item
 
     return best_candidate
+
+###########################################
+# VISUALIZATION: Composite Score by Strike
+###########################################
+def compute_composite_score(item, position_side='short'):
+    """
+    Compute a composite score for an option instrument.
+    Mirrors the logic in select_optimal_strike.
+    """
+    score = 0
+    if 'EV' in item and item['EV'] is not None:
+        score = item['EV']
+    else:
+        score = 1 - abs(item.get('delta', 0) - 0.5)
+    
+    if 'gamma' in item and item.get('gamma', 0) > 0:
+        if position_side.lower() == "short":
+            score /= item['gamma']
+        else:
+            score *= item['gamma']
+    
+    if 'open_interest' in item and item['open_interest']:
+        score += 0.01 * item['open_interest']
+    
+    return score
 
 ###########################################
 # CORRELATION ANALYSIS: MARK PRICE CORRELATION BETWEEN STRIKES
@@ -518,7 +542,7 @@ def main():
             gamma_val = np.random.uniform(0.01, 0.05)
         
         # Compute EV using the computed realized volatility.
-        # The EV calculation now adjusts based on the volatility view (short or long).
+        # Adjust EV based on the volatility strategy; here, using "short" vol.
         ev = compute_ev(iv, rv, T_YEARS, position_side="short")
         
         ticker_list.append({
@@ -536,6 +560,49 @@ def main():
         st.markdown(f"### Recommended Strike: **{optimal_ticker['strike']}** from {optimal_ticker['instrument']}")
     else:
         st.write("No optimal strike found based on the current criteria.")
+    
+    # -------------------- Composite Score Visualization --------------------
+    composite_scores = []
+    for ticker in ticker_list:
+        score = compute_composite_score(ticker, position_side="short")
+        composite_scores.append({
+            'strike': ticker['strike'],
+            'score': score,
+            'instrument': ticker['instrument'],
+            'EV': ticker['EV'],
+            'delta': ticker['delta'],
+            'gamma': ticker['gamma'],
+            'open_interest': ticker['open_interest']
+        })
+    df_scores = pd.DataFrame(composite_scores)
+    
+    fig = px.bar(
+        df_scores, 
+        x='strike', 
+        y='score',
+        hover_data=['instrument', 'EV', 'delta', 'gamma', 'open_interest'],
+        title="Composite Score by Strike (Higher is Better)"
+    )
+    # Highlight the recommended strike.
+    if optimal_ticker is not None:
+        recommended_strike = optimal_ticker['strike']
+        fig.add_vline(
+            x=recommended_strike, 
+            line_dash="dash", 
+            line_color="red",
+            annotation_text="Recommended Strike",
+            annotation_position="top"
+        )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    st.write("""
+### Why is this strike recommended?
+- **EV Advantage:** The computed EV for this strike is favorable compared to others.
+- **Gamma & Liquidity:** After adjusting for gamma (to account for risk sensitivity) and adding an open interest bonus, this strike achieves the highest composite score.
+- **Heuristic Insight:** This approach aligns with vol and option theory from research papers—balancing premium capture with risk exposure.
+- **Visual Evidence:** The bar chart above displays the composite scores, with the red dashed line marking the recommended strike.
+""")
     
     st.write("Analysis complete. Review the correlation analysis and optimal strike recommendation above.")
 
