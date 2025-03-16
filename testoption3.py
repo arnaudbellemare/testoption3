@@ -277,6 +277,7 @@ def fetch_kraken_data():
     except Exception as e:
         st.error(f"Error fetching Kraken data: {e}")
         return pd.DataFrame()
+df_daily = df_kraken.resample('D', on='date_time').last()
 
 ###########################################
 # REALIZED VOLATILITY CALCULATION FUNCTIONS
@@ -318,6 +319,7 @@ def calculate_daily_realized_volatility_series(df):
     df_daily["daily_return"] = df_daily["close"].pct_change()
     volatility_series = df_daily["daily_return"].rolling(window=30).std() * np.sqrt(365)
     return volatility_series.dropna()
+
 
 ###########################################
 # OPTION DELTA, GAMMA, AND GEX CALCULATION FUNCTIONS
