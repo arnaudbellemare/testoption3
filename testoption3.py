@@ -277,57 +277,45 @@ def fetch_kraken_data():
     return df_kraken
 
 ###########################################
-# VOLATILITY CALCULATION FUNCTION (5-minute data)
+# VOLATILITY CALCULATION FUNCTIONS
 ###########################################
-def compute_30day_volatility(prices, annualize_days=365):
+def calculate_btc_annualized_volatility_daily(df, annualize_days=365):
     """
-    Compute annualized volatility based on the standard deviation of daily
-    percentage changes over the last 30 days.
-    'prices' is expected to be a pandas Series of daily closing prices.
+    Calculates the annualized realized volatility of BTC using the last 30 days
+    of daily percentage returns.
     """
-    returns = prices.pct_change().dropna().tail(30)
-    daily_std = returns.std()
+    # Ensure the DataFrame has a 'date_time' column
+    if "date_time" not in df.columns:
+        if isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index()  # Convert index to 'date_time' column
+        else:
+            raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
+    # Resample to daily data using the last available close price of each day
+    df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
+    # Calculate daily percentage returns
+    df_daily["daily_return"] = df_daily["close"].pct_change()
+    # Get the last 30 days of returns
+    last_30_returns = df_daily["daily_return"].dropna().tail(30)
+    if last_30_returns.empty:
+        return np.nan
+    daily_std = last_30_returns.std()
     annualized_vol = daily_std * np.sqrt(annualize_days)
     return annualized_vol
 
-###########################################
-# EWMA ROGER-SATCHELL VOLATILITY FUNCTIONS (for reference)
-###########################################
-def calculate_ewma_roger_satchell_volatility(price_data, span=30):
+def calculate_daily_realized_volatility_series(df):
     """
-    Calculate realized volatility using the Roger-Satchell estimator with an EWMA.
-    Assumes price_data has columns: 'open', 'high', 'low', 'close'.
+    Calculates a daily series of realized volatility using the daily percentage returns
+    over a 30-day rolling window.
     """
-    df = price_data.copy()
-    df['rs'] = (np.log(df['high'] / df['close']) * np.log(df['high'] / df['open']) +
-                np.log(df['low'] / df['close']) * np.log(df['low'] / df['open']))
-    ewma_rs = df['rs'].ewm(span=span, adjust=False).mean()
-    volatility = np.sqrt(ewma_rs.clip(lower=0))
-    return volatility
-
-def compute_daily_realized_volatility(df, span=30, annualize_days=365):
-    """
-    Resample the underlying data daily using OHLC aggregation, compute the
-    EWMA Roger-Satchell volatility, annualize it, and return the last value as a scalar.
-    (This function is provided for reference and is not used in the main volatility calculation.)
-    """
-    if 'date_time' in df.columns:
-        df_daily = df.resample('D', on='date_time').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last'
-        }).dropna()
-    else:
-        df_daily = df.resample('D').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last'
-        }).dropna()
-    daily_vol = calculate_ewma_roger_satchell_volatility(df_daily, span=span)
-    daily_vol_annualized = daily_vol * np.sqrt(annualize_days)
-    return daily_vol_annualized.iloc[-1]
+    if "date_time" not in df.columns:
+        if isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index()
+        else:
+            raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
+    df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
+    df_daily["daily_return"] = df_daily["close"].pct_change()
+    volatility_series = df_daily["daily_return"].rolling(window=30).std() * np.sqrt(annualize_days=365)
+    return volatility_series.dropna()
 
 ###########################################
 # OPTION DELTA, GAMMA, AND GEX CALCULATION FUNCTIONS
@@ -347,7 +335,7 @@ def compute_delta(row, S):
         T = 0.0001
     K = row["k"]
     sigma = row["iv_close"]
-    sigma_eff = sigma  # You can adjust sigma here if needed
+    sigma_eff = sigma
     try:
         d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
     except Exception:
@@ -369,7 +357,7 @@ def compute_gamma(row, S):
         return np.nan
     K = row["k"]
     sigma = row["iv_close"]
-    sigma_eff = sigma  # Adjust if needed
+    sigma_eff = sigma
     try:
         d1 = (np.log(S / K) + 0.5 * sigma_eff**2 * T) / (sigma_eff * np.sqrt(T))
     except Exception:
@@ -548,24 +536,44 @@ def recommend_volatility_strategy(atm_iv, rv):
         return "neutral"
 
 ###########################################
-# NEW: COMPUTE 30-DAY REALIZED VOLATILITY FROM DAILY PRICES
+# DAILY VOLATILITY CALCULATION FUNCTIONS
 ###########################################
-def compute_30day_volatility(prices, annualize_days=365):
+def calculate_btc_annualized_volatility_daily(df):
     """
-    Compute annualized volatility based on the standard deviation of daily percentage
-    changes over the last 30 days.
-    
-    Parameters:
-      prices (pd.Series): Daily closing prices of BTC.
-      annualize_days (int): Number of days used for annualization (365 for BTC).
-    
-    Returns:
-      float: Annualized volatility.
+    Calculates the annualized realized volatility of BTC using the last 30 days of daily percentage returns.
     """
-    returns = prices.pct_change().dropna().tail(30)
-    daily_std = returns.std()
-    annualized_vol = daily_std * np.sqrt(annualize_days)
+    # Ensure the DataFrame has a 'date_time' column
+    if "date_time" not in df.columns:
+        if isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index()  # Convert index to 'date_time' column
+        else:
+            raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
+    # Resample to daily data using the last available close price of each day
+    df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
+    # Calculate daily percentage returns
+    df_daily["daily_return"] = df_daily["close"].pct_change()
+    # Get the last 30 days of returns
+    last_30_returns = df_daily["daily_return"].dropna().tail(30)
+    if last_30_returns.empty:
+        return np.nan
+    daily_std = last_30_returns.std()
+    annualized_vol = daily_std * np.sqrt(365)
     return annualized_vol
+
+def calculate_daily_realized_volatility_series(df):
+    """
+    Calculates a daily series of realized volatility using the daily percentage returns
+    over a 30-day rolling window.
+    """
+    if "date_time" not in df.columns:
+        if isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index()
+        else:
+            raise KeyError("No 'date_time' column found and index is not a DatetimeIndex.")
+    df_daily = df.set_index("date_time").resample("D").last().dropna(subset=["close"])
+    df_daily["daily_return"] = df_daily["close"].pct_change()
+    volatility_series = df_daily["daily_return"].rolling(window=30).std() * np.sqrt(365)
+    return volatility_series.dropna()
 
 ###########################################
 # MAIN DASHBOARD FUNCTION
@@ -599,10 +607,10 @@ def main():
     spot_price = df_kraken["close"].iloc[-1]
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
     
-    # Compute Realized Volatility using 30-day daily returns
-    # Resample df_kraken to daily frequency by taking the last close value
+    # Compute Realized Volatility using daily data (30-day window)
+    # Resample Kraken data to daily frequency
     df_daily = df_kraken.resample('D', on='date_time').last()
-    rv = compute_30day_volatility(df_daily['close'], annualize_days=365)
+    rv = calculate_btc_annualized_volatility_daily(df_daily)
     st.write(f"Computed Realized Volatility (annualized, 30-day): {rv:.4f}")
     
     # Fetch instruments and compute ATM IV for strategy recommendation
@@ -783,28 +791,6 @@ def adjust_for_liquidity(ticker_list):
                 item['EV'] *= (1 - spread / mid)
     return ticker_list
 
-def load_previous_trades():
-    """
-    Load historical trade data for backtesting.
-    For demonstration, returns a dummy DataFrame.
-    """
-    return pd.DataFrame({
-        'EV': np.random.normal(0, 1, 100),
-        'gamma': np.random.normal(0, 1, 100),
-        'oi': np.random.normal(0, 1, 100),
-        'profit': np.random.normal(0, 1, 100)
-    })
-
-def optimize_weights(historical_data, target='profit', features=['EV', 'gamma', 'oi']):
-    """
-    Optimize weights using linear regression on historical trade data.
-    """
-    X = historical_data[features]
-    y = historical_data[target]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = LinearRegression()
-    model.fit(X_train, y_train)
-    return model.coef_
 
 def recommend_volatility_strategy(atm_iv, rv):
     """
