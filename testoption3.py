@@ -617,7 +617,11 @@ def main():
     if df.empty:
         st.error("No data fetched from Thalex. Please check the API or instrument names.")
         return
-    
+
+    # Ensure 'open_interest' exists in df; if missing, fill with zeros.
+    if "open_interest" not in df.columns:
+        df["open_interest"] = 0
+
     df_calls = df[df["option_type"] == "C"].copy().sort_values("date_time")
     df_puts = df[df["option_type"] == "P"].copy().sort_values("date_time")
     
@@ -654,7 +658,7 @@ def main():
         })
     smile_df = build_smile_df(preliminary_ticker_list)
     
-    # Define position_side before using it
+    # Define position_side based on a recommended strategy (here using first filtered call's IV as proxy)
     recommended_strategy = recommend_volatility_strategy(get_actual_iv(filtered_calls[0]), 
                                                          calculate_btc_annualized_volatility_daily(df_kraken))
     position_side = st.sidebar.selectbox("Volatility Strategy", ["short", "long"],
@@ -692,10 +696,12 @@ def main():
         rv_vol = calculate_btc_annualized_volatility_daily(df)
         vol_regime = "Risk-On" if iv_vol < rv_vol else "Risk-Off"
         vrp_regime = "Long Volatility" if (iv_vol**2 - rv_vol**2) < 0 else "Short Volatility"
+        # Ensure open_interest exists
+        if "open_interest" not in df.columns:
+            df["open_interest"] = 0
         put_oi = df[df["option_type"]=="P"]["open_interest"].sum() if not df.empty else 0
         call_oi = df[df["option_type"]=="C"]["open_interest"].sum() if not df.empty else 0
         put_call_ratio = put_oi / call_oi if call_oi > 0 else np.inf
-        # For now, average deltas and gammas are placeholders
         avg_call_delta = 0.0
         avg_put_delta = 0.0
         avg_call_gamma = 0.0
@@ -742,8 +748,7 @@ def main():
     position = trade_decision['position']
     st.write("EV analysis not fully implemented in this demo.")
     
-    # Determine futures hedge for the straddle
-    # Here we assume a placeholder net delta (e.g., from an ATM straddle, near zero)
+    # Determine futures hedge for the straddle (placeholder net delta computation)
     straddle_delta = 0  # In practice, compute net delta from your straddle position.
     if straddle_delta > 0:
         futures_action = "Short Futures (delta -1)"
