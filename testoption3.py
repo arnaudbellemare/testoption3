@@ -9,7 +9,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 from scipy.stats import norm
 import math
-from scipy.interpolate import CubicSpline
 
 ###########################################
 # EXPIRATION DATE SELECTION FUNCTIONS
@@ -33,7 +32,7 @@ def get_valid_expiration_options(current_date=None):
 def compute_expiry_date(selected_day, current_date=None):
     """
     Compute the expiration date based on the selected day.
-    Uses current month if possible; otherwise, rolls over to next month.
+    Uses the current month if possible; otherwise, rolls over to the next month.
     """
     if current_date is None:
         current_date = dt.datetime.now()
@@ -53,7 +52,7 @@ def compute_expiry_date(selected_day, current_date=None):
 # Thalex API DETAILS AND GLOBAL SETTINGS
 ###########################################
 BASE_URL = "https://thalex.com/api/v2/public"
-instruments_endpoint = "instruments"  # Endpoint for fetching available instruments
+instruments_endpoint = "instruments"
 url_instruments = f"{BASE_URL}/{instruments_endpoint}"
 mark_price_endpoint = "mark_price_historical_data"
 url_mark_price = f"{BASE_URL}/{mark_price_endpoint}"
@@ -94,7 +93,7 @@ COLUMNS = [
 def load_credentials():
     """
     Load user credentials from local text files.
-    This is for demonstration purposes only.
+    For demonstration purposes only.
     """
     try:
         with open("usernames.txt", "r") as f_user:
@@ -150,7 +149,7 @@ def fetch_instruments():
 def get_option_instruments(instruments, option_type, expiry_str):
     """
     Filter instruments by option type (C or P) and expiry.
-    Example instrument: BTC-28MAR25-40000-C.
+    Example: BTC-28MAR25-40000-C.
     """
     filtered = [inst["instrument_name"] for inst in instruments 
                 if inst["instrument_name"].startswith(f"BTC-{expiry_str}") 
@@ -191,7 +190,7 @@ def get_atm_iv(calls_all, spot_price):
 
 def get_filtered_instruments(spot_price, expiry_str, t_years, multiplier=1):
     """
-    Filter instruments based on a theoretical range using the ATM IV as a proxy.
+    Filter instruments based on a theoretical range using the ATM IV.
     The range is defined as spot_price * exp(± atm_iv * sqrt(t_years) * multiplier).
     """
     instruments_list = fetch_instruments()
@@ -301,7 +300,7 @@ def calculate_ewma_roger_satchell_volatility(price_data, span=30):
 def compute_daily_realized_volatility(df, span=30, annualize_days=365):
     """
     Resample underlying data daily using OHLC aggregation, compute the EWMA Roger-Satchell volatility,
-    annualize it, and return the most recent value as a scalar.
+    annualize it, and return the most recent (last) value as a float.
     """
     if 'date_time' in df.columns:
         df_daily = df.resample('D', on='date_time').agg({
@@ -319,8 +318,8 @@ def compute_daily_realized_volatility(df, span=30, annualize_days=365):
         }).dropna()
     daily_vol = calculate_ewma_roger_satchell_volatility(df_daily, span=span)
     daily_vol_annualized = daily_vol * np.sqrt(annualize_days)
-    # Return the last available value as a scalar
-    return daily_vol_annualized.iloc[-1]
+    # Return the last available value as a float
+    return float(daily_vol_annualized.iloc[-1])
 
 ###########################################
 # OPTION DELTA, GAMMA, AND GEX CALCULATION FUNCTIONS
@@ -430,7 +429,7 @@ def select_optimal_strike(ticker_list, position_side='short'):
 def compute_composite_score(item, position_side='short'):
     """
     Compute a raw composite score for an option instrument for visualization.
-    This does not normalize metrics; it helps display relative differences.
+    This does not normalize metrics; it shows relative differences.
     """
     score = item['EV']
     if item.get('gamma', 0) > 0:
@@ -503,7 +502,7 @@ def main():
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
 
     # 5) Compute Realized Volatility using EWMA Roger-Satchell
-    rv = compute_daily_realized_volatility(df_kraken, span=30, annualize_days=365)
+    rv = float(compute_daily_realized_volatility(df_kraken, span=30, annualize_days=365))
     st.write(f"Computed Realized Volatility (annualized, EWMA Roger-Satchell): {rv:.4f}")
 
     # 6) Filter Instruments Based on Theoretical Strike Range
@@ -567,10 +566,10 @@ def main():
         T = (expiry_date - current_date).days / 365.0
         S = spot_price
         
-        # Compute EV based on selected strategy
+        # Compute EV based on the selected strategy (short or long)
         ev = compute_ev(iv, rv, T, position_side=position_side)
         
-        # Compute Gamma if available, else use nominal random value
+        # Compute Gamma if available, otherwise use a nominal value
         gamma_val = np.nan
         if option_type == "C":
             temp = df_calls[df_calls["instrument_name"] == instrument]
@@ -599,7 +598,7 @@ def main():
     else:
         st.write("No optimal strike found based on the current criteria.")
     
-    # 11) Visualize Raw Composite Scores
+    # 11) Visualize Raw Composite Scores by Strike
     composite_scores = []
     for ticker in ticker_list:
         score = compute_composite_score(ticker, position_side=position_side)
@@ -634,13 +633,13 @@ def main():
     
     st.write(f"""
 ### Why is this strike recommended?
-- **EV Calculation ({position_side} vol)**: EV is computed using an adaptive formula.
+- **EV Calculation ({position_side} vol):** EV is computed using an adaptive formula:
   - For short vol, it favors cases where IV > RV.
   - For long vol, it favors cases where RV > IV.
-- **Gamma Weighting**: Gamma is penalized for short vol and rewarded for long vol.
-- **Liquidity**: Open interest adds a small bonus.
-- **Heuristic Approach**: Normalized metrics in the composite score balance these factors.
-- **Visual Evidence**: The bar chart above shows composite scores per strike, with the recommended strike highlighted in red.
+- **Gamma Weighting:** Gamma is penalized for short vol and rewarded for long vol.
+- **Liquidity:** Open interest contributes a small bonus.
+- **Heuristic Approach:** Normalized metrics in the composite score balance these factors.
+- **Visual Evidence:** The bar chart above displays composite scores per strike, with the recommended strike highlighted in red.
 """)
     
     st.write("Analysis complete. Review the correlation analysis and recommended strike above.")
