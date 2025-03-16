@@ -17,8 +17,8 @@ def get_valid_expiration_options(current_date=None):
     """
     Return valid expiration day options based on today's date.
     If today's date is before the 14th, both 14 and 28 are valid.
-    If on/after 14 but before 28, only 28 is valid.
-    If on/after 28, provide 14 and 28 for the next month.
+    If it's on/after the 14th but before 28, only 28 is valid.
+    If it's on/after 28, provide 14 and 28 for the next month.
     """
     if current_date is None:
         current_date = dt.datetime.now()
@@ -32,7 +32,7 @@ def get_valid_expiration_options(current_date=None):
 def compute_expiry_date(selected_day, current_date=None):
     """
     Compute the expiration date based on the selected day.
-    Uses the current month if possible; otherwise, rolls over to the next month.
+    Uses current month if possible; otherwise, rolls over to next month.
     """
     if current_date is None:
         current_date = dt.datetime.now()
@@ -52,7 +52,7 @@ def compute_expiry_date(selected_day, current_date=None):
 # Thalex API DETAILS AND GLOBAL SETTINGS
 ###########################################
 BASE_URL = "https://thalex.com/api/v2/public"
-instruments_endpoint = "instruments"
+instruments_endpoint = "instruments"  # For fetching available instruments
 url_instruments = f"{BASE_URL}/{instruments_endpoint}"
 mark_price_endpoint = "mark_price_historical_data"
 url_mark_price = f"{BASE_URL}/{mark_price_endpoint}"
@@ -89,11 +89,10 @@ COLUMNS = [
 ###########################################
 # CREDENTIALS & LOGIN FUNCTIONS
 ###########################################
-# NOTE: For production, use Streamlit's secrets management.
 def load_credentials():
     """
     Load user credentials from local text files.
-    For demonstration purposes only.
+    (For production, use Streamlit's secrets or environment variables.)
     """
     try:
         with open("usernames.txt", "r") as f_user:
@@ -110,8 +109,8 @@ def load_credentials():
 
 def login():
     """
-    Displays a login form and validates credentials.
-    Sets st.session_state.logged_in to True upon successful login.
+    Display a login form and validate credentials.
+    Sets st.session_state.logged_in = True upon successful login.
     """
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
@@ -190,7 +189,7 @@ def get_atm_iv(calls_all, spot_price):
 
 def get_filtered_instruments(spot_price, expiry_str, t_years, multiplier=1):
     """
-    Filter instruments based on a theoretical range using the ATM IV.
+    Filter instruments based on a theoretical range using the ATM IV as a proxy.
     The range is defined as spot_price * exp(± atm_iv * sqrt(t_years) * multiplier).
     """
     instruments_list = fetch_instruments()
@@ -299,8 +298,8 @@ def calculate_ewma_roger_satchell_volatility(price_data, span=30):
 
 def compute_daily_realized_volatility(df, span=30, annualize_days=365):
     """
-    Resample underlying data daily using OHLC aggregation, compute the EWMA Roger-Satchell volatility,
-    annualize it, and return the most recent (last) value as a float.
+    Resample the underlying data daily using OHLC aggregation, compute the
+    EWMA Roger-Satchell volatility, annualize it, and return the last value as a scalar.
     """
     if 'date_time' in df.columns:
         df_daily = df.resample('D', on='date_time').agg({
@@ -318,8 +317,7 @@ def compute_daily_realized_volatility(df, span=30, annualize_days=365):
         }).dropna()
     daily_vol = calculate_ewma_roger_satchell_volatility(df_daily, span=span)
     daily_vol_annualized = daily_vol * np.sqrt(annualize_days)
-    # Return the last available value as a float
-    return float(daily_vol_annualized.iloc[-1])
+    return daily_vol_annualized.iloc[-1]
 
 ###########################################
 # OPTION DELTA, GAMMA, AND GEX CALCULATION FUNCTIONS
@@ -373,6 +371,27 @@ def compute_gex(row, S, oi):
     return gamma * oi * (S ** 2) * 0.01
 
 ###########################################
+# REALIZED VOLATILITY - EV CALCULATION FUNCTIONS
+###########################################
+def compute_ev(iv, rv, T, position_side="short"):
+    """
+    Compute the Expected Value (EV) for an option strategy.
+    For short volatility: EV = (((iv^2 - rv^2) * T) / 2) * 100
+    For long volatility: EV = (((rv^2 - iv^2) * T) / 2) * 100
+    """
+    try:
+        if position_side.lower() == "short":
+            ev = (((iv**2 - rv**2) * T) / 2) * 100
+        elif position_side.lower() == "long":
+            ev = (((rv**2 - iv**2) * T) / 2) * 100
+        else:
+            ev = (((iv**2 - rv**2) * T) / 2) * 100
+    except Exception as e:
+        st.error(f"Error computing EV: {e}")
+        ev = np.nan
+    return ev
+
+###########################################
 # NORMALIZATION FOR COMPOSITE SCORE
 ###########################################
 def normalize_metrics(metrics):
@@ -391,7 +410,7 @@ def select_optimal_strike(ticker_list, position_side='short'):
     """
     Select the optimal strike based on a composite score that adapts for short or long volatility.
     The composite score is computed from normalized EV, gamma, and open interest.
-    Gamma weight is negative for short volatility and positive for long volatility.
+    Gamma is penalized for short volatility (negative weight) and rewarded for long volatility (positive weight).
     """
     if not ticker_list:
         return None
@@ -429,7 +448,7 @@ def select_optimal_strike(ticker_list, position_side='short'):
 def compute_composite_score(item, position_side='short'):
     """
     Compute a raw composite score for an option instrument for visualization.
-    This does not normalize metrics; it shows relative differences.
+    Does not normalize metrics; used for showing relative differences.
     """
     score = item['EV']
     if item.get('gamma', 0) > 0:
@@ -502,7 +521,7 @@ def main():
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
 
     # 5) Compute Realized Volatility using EWMA Roger-Satchell
-    rv = float(compute_daily_realized_volatility(df_kraken, span=30, annualize_days=365))
+    rv = compute_daily_realized_volatility(df_kraken, span=30, annualize_days=365)
     st.write(f"Computed Realized Volatility (annualized, EWMA Roger-Satchell): {rv:.4f}")
 
     # 6) Filter Instruments Based on Theoretical Strike Range
@@ -525,7 +544,7 @@ def main():
     df_calls = df[df["option_type"] == "C"].copy().sort_values("date_time")
     df_puts = df[df["option_type"] == "P"].copy().sort_values("date_time")
     
-    # 8) Correlation Analysis
+    # 8) Correlation Analysis of Mark Prices
     st.subheader("Mark Price Correlation Between Strikes")
     corr_matrix = analyze_mark_price_correlation(df)
     fig_corr = px.imshow(
@@ -563,13 +582,13 @@ def main():
         iv = ticker_data.get("iv", None)
         if iv is None:
             continue
-        T = (expiry_date - current_date).days / 365.0
+        T = (expiry_date - current_date).days / 365.0  # Dynamic time to expiry
         S = spot_price
         
-        # Compute EV based on the selected strategy (short or long)
+        # Compute EV based on selected strategy
         ev = compute_ev(iv, rv, T, position_side=position_side)
         
-        # Compute Gamma if available, otherwise use a nominal value
+        # Compute Gamma; if unavailable, assign a nominal random value
         gamma_val = np.nan
         if option_type == "C":
             temp = df_calls[df_calls["instrument_name"] == instrument]
@@ -591,7 +610,7 @@ def main():
             "EV": ev
         })
     
-    # 10) Select the Optimal Strike Using Adaptive Composite Score
+    # 10) Select the Optimal Strike Based on Adaptive Composite Score
     optimal_ticker = select_optimal_strike(ticker_list, position_side=position_side)
     if optimal_ticker:
         st.markdown(f"### Recommended Strike: **{optimal_ticker['strike']}** from {optimal_ticker['instrument']}")
@@ -633,13 +652,13 @@ def main():
     
     st.write(f"""
 ### Why is this strike recommended?
-- **EV Calculation ({position_side} vol):** EV is computed using an adaptive formula:
-  - For short vol, it favors cases where IV > RV.
-  - For long vol, it favors cases where RV > IV.
-- **Gamma Weighting:** Gamma is penalized for short vol and rewarded for long vol.
-- **Liquidity:** Open interest contributes a small bonus.
-- **Heuristic Approach:** Normalized metrics in the composite score balance these factors.
-- **Visual Evidence:** The bar chart above displays composite scores per strike, with the recommended strike highlighted in red.
+- **EV Calculation ({position_side} vol)**: EV is computed using an adaptive formula.
+  - For short vol, it favors cases where IV exceeds RV.
+  - For long vol, it favors cases where RV exceeds IV.
+- **Gamma Weighting**: Gamma is penalized for short vol and rewarded for long vol.
+- **Liquidity**: Open interest adds a small bonus.
+- **Heuristic Approach**: Normalized metrics ensure a balanced composite score.
+- **Visual Evidence**: The bar chart above shows composite scores per strike, with the recommended strike highlighted in red.
 """)
     
     st.write("Analysis complete. Review the correlation analysis and recommended strike above.")
