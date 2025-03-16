@@ -19,21 +19,18 @@ from scipy.interpolate import CubicSpline
 def get_valid_expiration_options(current_date=None):
     """
     Return valid expiration day options based on today's date.
-    Note: This function still uses fixed choices, but the compute_expiry_date function
-    will validate against the target month's length.
+    Note: This function returns fixed choices, e.g., 14 and 28.
     """
     if current_date is None:
         current_date = dt.datetime.now()
-    # In many markets, 14th and 28th are common; adjust as needed.
     return [14, 28]
 
 def compute_expiry_date(selected_day, current_date=None):
     """
     Compute the expiration date robustly.
     
-    - If the current date is before the selected day, use the current month.
-    - Otherwise, roll over to the next month.
-    - Validate the selected day against the number of days in the target month.
+    - Use the current month if possible; otherwise, roll over to the next month.
+    - Validate the selected day against the target month's length.
     """
     if current_date is None:
         current_date = dt.datetime.now()
@@ -41,14 +38,12 @@ def compute_expiry_date(selected_day, current_date=None):
         year = current_date.year
         month = current_date.month
     else:
-        # Roll over to next month; handle December rollover
         if current_date.month == 12:
             year = current_date.year + 1
             month = 1
         else:
             year = current_date.year
             month = current_date.month + 1
-    # Get the number of days in the target month
     last_day = calendar.monthrange(year, month)[1]
     if selected_day > last_day:
         st.error(f"Selected expiration day {selected_day} exceeds days in month {month} (max {last_day}).")
@@ -101,7 +96,7 @@ COLUMNS = [
 def load_credentials():
     """
     Load user credentials from text files.
-    NOTE: For production use, prefer environment variables or Streamlit secrets.
+    NOTE: For production, use environment variables or Streamlit secrets.
     """
     try:
         with open("usernames.txt", "r") as f_user:
@@ -117,7 +112,7 @@ def load_credentials():
         return {}
 
 def login():
-    """Displays a login form and validates credentials."""
+    """Display a login form and validate credentials."""
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
     if not st.session_state.logged_in:
@@ -146,14 +141,19 @@ def fetch_instruments():
     data = response.json()
     return data.get("result", [])
 
-# Use regular expression to parse instrument names robustly.
-def parse_instrument_name(instrument_name):
+def parse_instrument_name(inst):
     """
-    Parse instrument name using regex.
+    Parse an instrument from either a dict or string.
     Expected format: BTC-<EXPIRY>-<STRIKE>-<OPTION_TYPE>
     e.g., BTC-28MAR25-100000-C
-    Returns a tuple: (expiry_str, strike, option_type)
+    Returns (expiry_str, strike, option_type) or (None, None, None) on failure.
     """
+    if isinstance(inst, dict):
+        instrument_name = inst.get("instrument_name", "")
+    elif isinstance(inst, str):
+        instrument_name = inst
+    else:
+        instrument_name = str(inst)
     pattern = r"BTC-(\d{2}[A-Z]{3}\d{2})-(\d+)-(C|P)"
     match = re.match(pattern, instrument_name)
     if match:
@@ -175,7 +175,7 @@ def get_option_instruments(instruments, option_type, expiry_str):
         exp, strike, opt_type = parse_instrument_name(inst)
         if exp == expiry_str and opt_type == option_type:
             filtered.append(inst)
-    return sorted(filtered)
+    return sorted(filtered, key=lambda x: parse_instrument_name(x)[1] if parse_instrument_name(x)[1] is not None else 0)
 
 def get_actual_iv(instrument_name):
     """Fetch mark price data for an instrument and return its latest IV (iv_close)."""
@@ -203,7 +203,6 @@ def get_filtered_instruments(spot_price, expiry_str, t_years, multiplier=1):
     calls_all = get_option_instruments(instruments_list, "C", expiry_str)
     puts_all = get_option_instruments(instruments_list, "P", expiry_str)
     
-    # Extract strikes using regex.
     strike_list = []
     for inst in calls_all:
         exp, strike, opt_type = parse_instrument_name(inst)
@@ -218,7 +217,6 @@ def get_filtered_instruments(spot_price, expiry_str, t_years, multiplier=1):
     if actual_iv is None:
         raise Exception("Could not fetch actual IV for the nearest instrument")
     
-    # Compute bounds using exponential scaling.
     lower_bound = spot_price * np.exp(-actual_iv * np.sqrt(t_years) * multiplier)
     upper_bound = spot_price * np.exp(actual_iv * np.sqrt(t_years) * multiplier)
     
@@ -305,12 +303,11 @@ def fetch_kraken_data():
 def compute_realized_volatility(df):
     """
     Compute the realized volatility from underlying close prices.
-    Uses 5-minute intervals (288 per day) and annualizes using sqrt(288*365).
-    Corrects for the cumulative squared returns.
+    Uses 5-minute intervals (288 per day) and annualizes using sqrt(288*365),
+    computing the square root of the sum of squared returns.
     """
     df = df.copy()
     returns = df['close'].pct_change().dropna()
-    # Sum of squared returns, then take sqrt and annualize.
     rv = np.sqrt((returns ** 2).sum()) * np.sqrt(288 * 365)
     return rv
 
@@ -339,12 +336,11 @@ def compute_ev(iv, rv, T, position_side="short"):
 def compute_delta(row, S):
     """Compute Black-Scholes delta for an option."""
     try:
-        expiry_str = parse_instrument_name(row["instrument_name"])[0]
-        expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
+        exp_str, _, _ = parse_instrument_name(row["instrument_name"])
+        expiry_date = dt.datetime.strptime(exp_str, "%d%b%y")
         expiry_date = expiry_date.replace(tzinfo=row["date_time"].tzinfo)
     except Exception:
         return np.nan
-    # Compute T dynamically based on actual expiry.
     T = (expiry_date - row["date_time"]).total_seconds() / (365 * 24 * 3600)
     T = T if T > 0 else 0.0001
     K = row["k"]
@@ -360,8 +356,8 @@ def compute_delta(row, S):
 def compute_gamma(row, S):
     """Compute Black-Scholes gamma for an option."""
     try:
-        expiry_str = parse_instrument_name(row["instrument_name"])[0]
-        expiry_date = dt.datetime.strptime(expiry_str, "%d%b%y")
+        exp_str, _, _ = parse_instrument_name(row["instrument_name"])
+        expiry_date = dt.datetime.strptime(exp_str, "%d%b%y")
         expiry_date = expiry_date.replace(tzinfo=row["date_time"].tzinfo)
     except Exception:
         return np.nan
@@ -390,12 +386,10 @@ def select_optimal_strike(ticker_list, strategy='EV', position_side='short'):
     Select the optimal strike based on a composite score.
     
     Composite score is based on:
-      - Expected Value (EV) as the primary metric.
+      - EV as the primary metric.
       - Gamma adjustment (penalizing high gamma for short volatility).
       - Open Interest as a liquidity bonus.
       - Fallback to delta proximity if EV is missing.
-    
-    This heuristic approach is informed by option theory research.
     """
     best_score = -np.inf
     best_candidate = None
@@ -427,7 +421,7 @@ def select_optimal_strike(ticker_list, strategy='EV', position_side='short'):
 ###########################################
 def compute_composite_score(item, position_side='short'):
     """
-    Compute a composite score for visualization.
+    Compute a composite score for an option instrument.
     Mirrors the logic in select_optimal_strike.
     """
     score = 0
@@ -453,8 +447,6 @@ def compute_composite_score(item, position_side='short'):
 def analyze_mark_price_correlation(df):
     """
     Analyze the correlation between mark prices across different strikes.
-    
-    High correlation indicates consistent pricing; anomalies may signal liquidity or model issues.
     """
     pivot_df = df.pivot_table(index="date_time", columns="instrument_name", values="mark_price_close")
     corr_matrix = pivot_df.corr()
@@ -539,7 +531,7 @@ def main():
     fig_corr.update_layout(height=800, width=1200)
     st.plotly_chart(fig_corr, use_container_width=False)
     
-    # Additional Visualization: Volatility Surface (IV vs. Strike)
+    # Additional Visualization: Volatility Surface (IV vs. Strike) at Latest Timestamp
     st.subheader("Volatility Surface (IV vs. Strike) at Latest Timestamp")
     latest_ts = df["date_time"].max()
     latest_data = df[df["date_time"] == latest_ts]
@@ -556,14 +548,13 @@ def main():
         ticker_data = fetch_ticker(instrument)
         if not ticker_data or "open_interest" not in ticker_data:
             continue
-        try:
-            _, strike, option_type = parse_instrument_name(instrument)
-        except Exception:
+        exp, strike, option_type = parse_instrument_name(instrument)
+        if strike is None:
             continue
         iv = ticker_data.get("iv", None)
         if iv is None:
             continue
-        # Dynamic time to expiry: use T_YEARS computed earlier.
+        # Dynamic time to expiry from earlier T_YEARS
         T = T_YEARS
         S = spot_price
         try:
@@ -572,7 +563,7 @@ def main():
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
         
-        # Gamma estimation: get from corresponding calls/puts.
+        # Gamma estimation using corresponding calls/puts.
         gamma_val = np.nan
         if option_type == "C":
             temp = df_calls[df_calls["instrument_name"] == instrument]
@@ -585,7 +576,7 @@ def main():
         if np.isnan(gamma_val):
             gamma_val = np.random.uniform(0.01, 0.05)
         
-        # Compute EV using IV, RV, and dynamic T.
+        # Compute EV using IV, RV, and dynamic T. For short volatility strategy.
         ev = compute_ev(iv, rv, T, position_side="short")
         
         ticker_list.append({
@@ -640,10 +631,9 @@ def main():
     st.write("""
 ### Why is this strike recommended?
 - **EV Advantage:** The computed EV for this strike is more favorable compared to others.
-- **Gamma & Liquidity Adjustment:** After penalizing for high gamma (risk sensitivity) and adding an open interest bonus,
-  this strike attains the highest composite score.
-- **Heuristic Insight:** The approach, based on option theory and volatility research, balances premium capture with risk exposure.
-- **Visual Evidence:** The bar chart above displays the composite scores for each strike with the recommended strike highlighted.
+- **Gamma & Liquidity Adjustment:** After penalizing for high gamma (risk sensitivity) and adding an open interest bonus, this strike attains the highest composite score.
+- **Heuristic Insight:** This approach, informed by option theory and volatility research, balances premium capture with risk exposure.
+- **Visual Evidence:** The bar chart above displays composite scores by strike, with the red dashed line marking the recommended strike.
 """)
     
     st.write("Analysis complete. Review the correlation analysis and optimal strike recommendation above.")
