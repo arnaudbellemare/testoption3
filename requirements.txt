@@ -6,4 +6,4 @@ ccxt
 toolz
 plotly
 scipy
-sklearn
+scikit-learn
