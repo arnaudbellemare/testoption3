@@ -81,24 +81,30 @@ COLUMNS = [
 ]
 
 ###########################################
-# CREDENTIALS & LOGIN FUNCTIONS
+# CREDENTIALS & LOGIN FUNCTIONS (USING TEXT FILES)
 ###########################################
 def load_credentials():
     """
-    Load user credentials from Streamlit secrets.
-    (For production, use st.secrets or environment variables.)
+    Load user credentials from local text files: usernames.txt and passwords.txt.
+    Each file should have one entry per line.
     """
     try:
-        creds = st.secrets["credentials"]
-        return creds
+        with open("usernames.txt", "r") as f_user:
+            usernames = [line.strip() for line in f_user if line.strip()]
+        with open("passwords.txt", "r") as f_pass:
+            passwords = [line.strip() for line in f_pass if line.strip()]
+        if len(usernames) != len(passwords):
+            st.error("The number of usernames and passwords do not match.")
+            return {}
+        return dict(zip(usernames, passwords))
     except Exception as e:
         st.error(f"Error loading credentials: {e}")
         return {}
 
 def login():
     """
-    Display a login form and validate credentials.
-    Sets st.session_state.logged_in = True upon success.
+    Display a login form and validate credentials using local text files.
+    Sets st.session_state.logged_in to True upon successful login.
     """
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
@@ -135,7 +141,7 @@ def fetch_instruments():
 def get_option_instruments(instruments, option_type, expiry_str):
     """
     Filter instruments by option type (C or P) and expiry.
-    For example: BTC-28MAR25-40000-C.
+    Example: BTC-28MAR25-40000-C.
     """
     filtered = [inst["instrument_name"] for inst in instruments 
                 if inst["instrument_name"].startswith(f"BTC-{expiry_str}") 
@@ -285,8 +291,8 @@ def calculate_ewma_roger_satchell_volatility(price_data, span=30):
 
 def compute_daily_realized_volatility(df, span=30, annualize_days=365):
     """
-    Resample the underlying data daily using OHLC aggregation, compute the EWMA Roger-Satchell volatility,
-    annualize it, and return the last value as a scalar.
+    Resample the underlying data daily using OHLC aggregation, compute the
+    EWMA Roger-Satchell volatility, annualize it, and return the last value as a scalar.
     """
     if 'date_time' in df.columns:
         df_daily = df.resample('D', on='date_time').agg({
@@ -456,8 +462,8 @@ def plot_volatility_surface(df, spot_price):
     df = df.copy()
     df['moneyness'] = df['k'] / spot_price
     df['T'] = (df['date_time'].max() - df['date_time']).dt.days / 365.0
-    fig = px.scatter_3d(df, x='moneyness', y='T', z='iv_close', color='option_type',
-                          title="Volatility Surface")
+    fig = px.scatter_3d(df, x='moneyness', y='T', z='iv_close',
+                        color='option_type', title="Volatility Surface")
     st.plotly_chart(fig)
 
 ###########################################
@@ -471,10 +477,10 @@ def adjust_for_liquidity(ticker_list):
         bid = item.get('bid', 0)
         ask = item.get('ask', 0)
         if bid and ask:
-            bid_ask_spread = ask - bid
-            mid_price = (ask + bid) / 2
-            if mid_price > 0:
-                item['EV'] *= (1 - bid_ask_spread / mid_price)
+            spread = ask - bid
+            mid = (ask + bid) / 2
+            if mid > 0:
+                item['EV'] *= (1 - spread / mid)
     return ticker_list
 
 ###########################################
@@ -483,7 +489,7 @@ def adjust_for_liquidity(ticker_list):
 def load_previous_trades():
     """
     Load historical trade data for backtesting.
-    For demonstration, returns a dummy dataframe.
+    For demonstration, returns a dummy DataFrame.
     """
     return pd.DataFrame({
         'EV': np.random.normal(0, 1, 100),
@@ -522,7 +528,7 @@ def recommend_volatility_strategy(atm_iv, rv):
 # MAIN DASHBOARD FUNCTION
 ###########################################
 def main():
-    # Enforce login
+    # Enforce login using local text files for credentials
     login()
     st.title("Crypto Options Dashboard - Adaptive for Short or Long Volatility")
     
@@ -551,11 +557,11 @@ def main():
     spot_price = df_kraken["close"].iloc[-1]
     st.write(f"Current BTC/USD Price: {spot_price:.2f}")
     
-    # Compute Realized Volatility using EWMA Roger-Satchell method
+    # Compute Realized Volatility using EWMA Roger-Satchell method (annualized)
     rv = compute_daily_realized_volatility(df_kraken, span=30, annualize_days=252)
     st.write(f"Computed Realized Volatility (annualized): {rv:.4f}")
     
-    # Fetch instruments and compute ATM IV for automatic strategy recommendation
+    # Fetch instruments and compute ATM IV for strategy recommendation
     instruments_list = fetch_instruments()
     calls_all = get_option_instruments(instruments_list, "C", expiry_str)
     atm_iv = get_atm_iv(calls_all, spot_price)
@@ -564,6 +570,7 @@ def main():
         return
     st.write(f"ATM Implied Volatility: {atm_iv:.4f}")
     
+    # Automatically Recommend Volatility Strategy
     recommended_strategy = recommend_volatility_strategy(atm_iv, rv)
     st.write(f"### Automatically Recommended Volatility Strategy: {recommended_strategy.upper()} VOL")
     if recommended_strategy == "short":
@@ -601,7 +608,7 @@ def main():
     if df.empty:
         st.error("No data fetched from Thalex. Please check the API or instrument names.")
         return
-
+    
     # Volatility Surface Analysis
     plot_volatility_surface(df, spot_price)
     
@@ -649,12 +656,12 @@ def main():
     # Adjust for Liquidity (bid-ask spread)
     ticker_list = adjust_for_liquidity(ticker_list)
     
-    # Historical Backtesting for Optimal Weights
+    # Historical Backtesting for Optimal Weights (dummy data)
     historical_data = load_previous_trades()
     weights = optimize_weights(historical_data, target='profit', features=['EV', 'gamma', 'oi'])
     st.write(f"Optimal Weights (EV, Gamma, OI): {weights}")
     
-    # Select the Optimal Strike Based on Composite Score
+    # Select Optimal Strike Based on Composite Score
     optimal_ticker = select_optimal_strike(ticker_list, position_side=position_side)
     if optimal_ticker:
         st.markdown(f"### Recommended Strike: **{optimal_ticker['strike']}** from {optimal_ticker['instrument']}")
@@ -700,13 +707,13 @@ def main():
 - **Gamma Weighting**: Gamma is penalized for short vol and rewarded for long vol.
 - **Liquidity**: Open interest provides a small bonus.
 - **Heuristic Approach**: Normalized metrics ensure balanced composite scoring.
-- **Visual Evidence**: The bar chart shows composite scores per strike with the recommended strike highlighted.
+- **Visual Evidence**: The bar chart shows composite scores per strike, with the recommended strike highlighted.
 """)
     
     st.write("Analysis complete. Review the correlation analysis and recommended strike above.")
 
 ###########################################
-# ADDITIONAL FUNCTIONS: VOLATILITY SURFACE, LIQUIDITY, AND BACKTESTING
+# ADDITIONAL FUNCTIONS: VOLATILITY SURFACE, LIQUIDITY, BACKTESTING
 ###########################################
 def plot_volatility_surface(df, spot_price):
     """
@@ -756,6 +763,9 @@ def optimize_weights(historical_data, target='profit', features=['EV', 'gamma', 
     model.fit(X_train, y_train)
     return model.coef_
 
+###########################################
+# AUTOMATIC VOLATILITY STRATEGY RECOMMENDATION
+###########################################
 def recommend_volatility_strategy(atm_iv, rv):
     """
     Recommend a volatility strategy based on ATM IV and realized volatility.
