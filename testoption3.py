@@ -768,6 +768,10 @@ def normalize_metrics(metrics):
     return (arr - np.mean(arr)) / np.std(arr)
 
 def compute_composite_scores(ticker_list, position_side='short'):
+    # Ensure each ticker has a gamma value; if missing, set to 0.
+    for item in ticker_list:
+        if 'gamma' not in item:
+            item['gamma'] = 0
     ev_list = [item['EV'] for item in ticker_list]
     gamma_list = [item.get('gamma', 0) for item in ticker_list]
     oi_list = [item['open_interest'] for item in ticker_list]
@@ -1018,7 +1022,10 @@ def main():
     
     df_combined = pd.concat([df_short, df_long], ignore_index=True)
     
-    if "EV" in df_combined.columns and "gamma" in df_combined.columns and "open_interest" in df_combined.columns:
+    # If 'gamma' is missing, fill it with 0 so the table can be displayed.
+    if "EV" in df_combined.columns and "open_interest" in df_combined.columns:
+        if "gamma" not in df_combined.columns:
+            df_combined["gamma"] = 0
         df_combined = df_combined[["instrument", "strategy", "EV", "gamma", "open_interest", "composite_score"]]
         st.subheader("Combined Composite Score Table")
         st.dataframe(df_combined)
