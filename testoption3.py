@@ -385,7 +385,7 @@ def build_ticker_list_with_metrics(all_instruments, spot, T, smile_df, rv, posit
         except Exception:
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
-        ev_value = compute_ev(adjusted_iv, rv, T, position_side)  # EV using realized volatility (rv)
+        ev_value = compute_ev(adjusted_iv, rv, T, position_side)  # Adaptive EV
         gamma_val = compute_gamma_value(spot, strike, adjusted_iv, T) if adjusted_iv > 0 and T > 0 else 0
         gex_value = gamma_val * ticker_data["open_interest"] * (spot**2)
         ticker_list.append({
@@ -419,9 +419,7 @@ def calculate_atm_straddle_ev(ticker_list, spot, T, rv, position_side="short"):
     ev_candidates = []
     for strike, data in atm_strikes.items():
         avg_iv = data["iv_sum"] / data["count"]
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
-        ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
-        ev_value = compute_ev(avg_iv, rv, T, position_side)  # Use compute_ev for adaptation
+        ev_value = compute_ev(avg_iv, rv, T, position_side)
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
     return df_ev.sort_values("EV (%)", ascending=False)
@@ -442,8 +440,6 @@ def calculate_limited_otm_put_ev(ticker_list, spot, T, rv, position_side="long")
     ev_candidates = []
     for strike, data in group.items():
         avg_iv = data["iv_sum"] / data["count"]
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
-        ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
         ev_value = compute_ev(avg_iv, rv, T, position_side)
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
@@ -465,8 +461,6 @@ def calculate_call_spread_ev(ticker_list, spot, T, rv, position_side="short"):
     ev_candidates = []
     for strike, data in group.items():
         avg_iv = data["iv_sum"] / data["count"]
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
-        ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
         ev_value = compute_ev(avg_iv, rv, T, position_side)
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
@@ -489,8 +483,6 @@ def calculate_strangle_ev(ticker_list, spot, T, rv, position_side="short"):
     ev_candidates = []
     for strike, data in group.items():
         avg_iv = data["iv_sum"] / data["count"]
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
-        ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
         ev_value = compute_ev(avg_iv, rv, T, position_side)
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
@@ -511,8 +503,6 @@ def calculate_naked_call_ev(ticker_list, spot, T, rv, position_side="short"):
     ev_candidates = []
     for strike, data in group.items():
         avg_iv = data["iv_sum"] / data["count"]
-        ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
-        ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
         ev_value = compute_ev(avg_iv, rv, T, position_side)
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
@@ -683,19 +673,6 @@ def plot_gamma_heatmap(df):
     )
     fig_gamma_heatmap.update_layout(height=400, width=800)
     st.plotly_chart(fig_gamma_heatmap, use_container_width=True)
-
-def plot_gex_by_strike(df_gex):
-    st.subheader("Gamma Exposure (GEX) by Strike")
-    fig_gex = px.bar(
-        df_gex,
-        x="strike",
-        y="gex",
-        color="option_type",
-        title="Gamma Exposure (GEX) by Strike",
-        labels={"gex": "GEX", "strike": "Strike Price"}
-    )
-    fig_gex.update_layout(height=400, width=800)
-    st.plotly_chart(fig_gex, use_container_width=True)
 
 def plot_net_gex(df_gex, spot_price):
     st.subheader("Net Gamma Exposure by Strike")
@@ -944,6 +921,7 @@ def main():
             df_puts["gamma"] = df_puts.apply(lambda row: compute_delta(row, spot_price), axis=1)
         plot_gamma_heatmap(pd.concat([df_calls, df_puts]))
     
+    # Only display the Net GEX chart (no separate GEX table)
     gex_data = []
     for instrument in all_instruments:
         ticker_data = fetch_ticker(instrument)
@@ -967,9 +945,7 @@ def main():
         gex_data.append({"strike": strike, "gex": gex, "option_type": option_type})
     df_gex = pd.DataFrame(gex_data)
     if not df_gex.empty:
-        st.subheader("Gamma Exposure (GEX) by Strike")
-        st.dataframe(df_gex.style.hide(axis="index"))
-        plot_gex_by_strike(df_gex)
+        st.subheader("Net Gamma Exposure by Strike")
         plot_net_gex(df_gex, spot_price)
     
     ###########################################
