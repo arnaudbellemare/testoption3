@@ -1040,7 +1040,7 @@ def main():
             df_calls["gamma"] = df_calls.apply(lambda row: compute_delta(row, spot_price), axis=1)
         if "gamma" not in df_puts.columns:
             df_puts["gamma"] = df_puts.apply(lambda row: compute_delta(row, spot_price), axis=1)
-        plot_gamma_heatmap(pd.concat([df_calls, df_puts]))
+       
     
     gex_data = []
     for instrument in all_instruments:
