@@ -215,8 +215,8 @@ def fetch_data(instruments_tuple):
 
 @st.cache_data(ttl=30)
 def fetch_ticker(instrument_name):
-    params = {"instrument_name": instrument_name}
-    response = requests.get(URL_TICKER, params=params)
+    params_ = {"instrument_name": instrument_name}
+    response = requests.get(URL_TICKER, params=params_)
     if response.status_code != 200:
         return None
     data = response.json()
@@ -379,13 +379,14 @@ def build_ticker_list_with_metrics(all_instruments, spot, T, smile_df, rv, posit
         raw_iv = ticker_data.get("iv", None)
         if raw_iv is None:
             continue
+        # Use the smile-adjusted IV directly since we removed the Heston forecast
         adjusted_iv = adjust_volatility_with_smile(strike, smile_df)
         try:
             d1 = (np.log(spot / strike) + 0.5 * adjusted_iv**2 * T) / (adjusted_iv * np.sqrt(T))
         except Exception:
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
-        ev_value = compute_ev(adjusted_iv, rv, T, position_side)  # Adaptive EV
+        ev_value = compute_ev(adjusted_iv, rv, T, position_side)
         gamma_val = compute_gamma_value(spot, strike, adjusted_iv, T) if adjusted_iv > 0 and T > 0 else 0
         gex_value = gamma_val * ticker_data["open_interest"] * (spot**2)
         ticker_list.append({
@@ -601,6 +602,7 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     put_call_ratio = put_oi / call_oi if call_oi > 0 else np.inf
     df_calls = df[df["option_type"] == "C"].copy()
     df_puts = df[df["option_type"] == "P"].copy()
+    # For gamma, we use compute_delta here (or a dedicated gamma function if desired)
     if "gamma" not in df_calls.columns:
         df_calls["gamma"] = df_calls.apply(lambda row: compute_delta(row, spot_price), axis=1)
     if "gamma" not in df_puts.columns:
@@ -718,23 +720,18 @@ def classify_volatility_regime(current_vol, historical_vols):
 
 def plot_delta_balance(ticker_list, spot_price):
     st.subheader("Put vs Call Delta Balance")
-    
     if not ticker_list:
         st.warning("No ticker data available to calculate delta balance.")
         return
-        
     call_items = [item for item in ticker_list if item["option_type"] == "C"]
     put_items = [item for item in ticker_list if item["option_type"] == "P"]
-    
     call_weighted_delta = sum(item["delta"] * item["open_interest"] for item in call_items)
     put_weighted_delta = abs(sum(item["delta"] * item["open_interest"] for item in put_items))
-    
     delta_data = pd.DataFrame({
         'Option Type': ['Calls', 'Puts'],
         'Total Weighted Delta': [call_weighted_delta, put_weighted_delta],
         'Direction': ['Bullish', 'Bearish']
     })
-    
     fig = px.bar(
         delta_data,
         x='Option Type',
@@ -744,7 +741,6 @@ def plot_delta_balance(ticker_list, spot_price):
         title='Put vs Call Delta Balance (Open Interest Weighted)',
         labels={'Total Weighted Delta': 'Absolute Total Delta * Open Interest'}
     )
-    
     net_delta = call_weighted_delta - put_weighted_delta
     bias_strength = abs(net_delta)
     if net_delta > 0:
@@ -753,7 +749,6 @@ def plot_delta_balance(ticker_list, spot_price):
     else:
         bias_text = f"Market Bias: Bearish (Net Delta: {net_delta:.2f})"
         bias_color = "red"
-    
     fig.add_annotation(
         x=0.5,
         y=1.05,
@@ -768,7 +763,6 @@ def plot_delta_balance(ticker_list, spot_price):
         borderwidth=2,
         borderpad=4
     )
-    
     if put_weighted_delta > 0:
         delta_ratio = call_weighted_delta / put_weighted_delta
         fig.add_annotation(
@@ -782,9 +776,7 @@ def plot_delta_balance(ticker_list, spot_price):
             align="center",
             bgcolor="rgba(255, 255, 255, 0.8)"
         )
-    
     fig_strikes = create_delta_by_strike_chart(call_items, put_items, spot_price)
-    
     st.plotly_chart(fig, use_container_width=True)
     if fig_strikes:
         st.plotly_chart(fig_strikes, use_container_width=True)
@@ -797,7 +789,6 @@ def create_delta_by_strike_chart(call_items, put_items, spot_price):
         {"name": "OTM", "min_pct": 0.02, "max_pct": 0.10},
         {"name": "Deep OTM", "min_pct": 0.10, "max_pct": float('inf')}
     ]
-    
     range_data = []
     for strike_range in ranges:
         min_strike = spot_price * (1 + strike_range["min_pct"])
@@ -821,7 +812,6 @@ def create_delta_by_strike_chart(call_items, put_items, spot_price):
             "Weighted Delta": put_delta,
             "Sort Order": ranges.index(strike_range)
         })
-    
     df_range = pd.DataFrame(range_data)
     df_range = df_range.sort_values("Sort Order")
     fig = px.bar(
@@ -841,7 +831,7 @@ def create_delta_by_strike_chart(call_items, put_items, spot_price):
 ###########################################
 def main():
     login()
-    st.title("Crypto Options Visualization Dashboard with Enhanced Risk Adjustments")
+    st.title("Crypto Options Visualization Dashboard (Simplified Forecast)")
     if st.button("Logout"):
         st.session_state.logged_in = False
         st.stop()
@@ -927,13 +917,15 @@ def main():
         })
     smile_df = build_smile_df(preliminary_ticker_list)
     
+    # Use GBM forecast model (which is very fast) for any forward looking measures if needed.
+    # (In this simplified version, we omit any heavy forecast computations.)
+    
     # Calculate realized volatility (rv) from Kraken data
     rv = calculate_btc_annualized_volatility_daily(df_kraken)
     
     global ticker_list
     ticker_list = build_ticker_list_with_metrics(all_instruments, spot_price, T_YEARS, smile_df, rv, position_side="short")
     
-    # Create a DataFrame from ticker_list for hedge calculations
     df_ticker = pd.DataFrame(ticker_list)
     
     daily_rv_series = calculate_daily_realized_volatility_series(df_kraken)
@@ -968,7 +960,6 @@ def main():
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
-    # Futures Hedge Recommendation based on net delta
     net_delta = df_ticker.assign(weighted_delta=df_ticker["delta"] * df_ticker["open_interest"])["weighted_delta"].sum()
     if net_delta > 0:
         futures_hedge = "Short BTC Futures"
@@ -1009,7 +1000,6 @@ def main():
         st.subheader("EV Analysis")
         st.write("EV analysis for the selected position is not implemented yet.")
     
-    # EV Analysis Block
     if df_ev is not None and not df_ev.empty and not df_ev["EV"].isna().all():
         df_ev_clean = df_ev.dropna(subset=["EV"])
         if not df_ev_clean.empty:
@@ -1027,9 +1017,7 @@ def main():
         st.write("Simulating trade based on recommendation...")
         st.write("Position Size: Adjust based on capital (e.g., 1-5% of portfolio for chosen risk tolerance)")
         st.write("Monitor price and volatility in real-time and adjust hedges dynamically.")
-        ###########################################
-    # Composite Score Table (Using Actual Data)
-    ###########################################
+    
     short_ticker_list = update_ev_for_position(ticker_list.copy(), rv, T_YEARS, "short")
     long_ticker_list = update_ev_for_position(ticker_list.copy(), rv, T_YEARS, "long")
     short_scores = compute_composite_scores(short_ticker_list, position_side="short")
@@ -1044,6 +1032,7 @@ def main():
         st.dataframe(df_combined.style.hide(axis="index"))
     else:
         st.write("Composite score data is not available.")
+    
     st.subheader("Volatility Smile at Latest Timestamp")
     latest_ts = df["date_time"].max()
     smile_df_latest = df[df["date_time"] == latest_ts]
@@ -1067,7 +1056,6 @@ def main():
             df_puts["gamma"] = df_puts.apply(lambda row: compute_delta(row, spot_price), axis=1)
         plot_gamma_heatmap(pd.concat([df_calls, df_puts]))
     
-    # Only display the Net GEX chart (no separate GEX table)
     gex_data = []
     for instrument in all_instruments:
         ticker_data = fetch_ticker(instrument)
