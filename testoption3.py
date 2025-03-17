@@ -907,7 +907,23 @@ def main():
         st.write("Simulating trade based on recommendation...")
         st.write("Position Size: Adjust based on capital (e.g., 1-5% of portfolio for chosen risk tolerance)")
         st.write("Monitor price and volatility in real-time and adjust hedges dynamically.")
-    
+    ###########################################
+    # Futures Hedge Recommendation Table
+    ###########################################
+    # Compute net delta (sum of delta * open_interest) from the ticker list.
+    df_options = pd.DataFrame(ticker_list)
+    if not df_options.empty:
+        net_delta = (df_options["delta"] * df_options["open_interest"]).sum()
+        # For a long volatility position, if net delta is positive, futures hedge should be short.
+        hedge_direction = "Short" if net_delta > 0 else ("Long" if net_delta < 0 else "Neutral")
+        hedge_table = pd.DataFrame({
+            "Net Delta": [net_delta],
+            "Futures Hedge Direction": [hedge_direction]
+        })
+        st.subheader("Futures Hedge Recommendation (Based on Net Delta)")
+        st.dataframe(hedge_table)
+    else:
+        st.write("No options data available for futures hedge recommendation.")
     st.subheader("Volatility Smile at Latest Timestamp")
     latest_ts = df["date_time"].max()
     smile_df_latest = df[df["date_time"] == latest_ts]
@@ -972,23 +988,6 @@ def main():
     else:
         st.write("Composite score data is not available.")
     
-    ###########################################
-    # Futures Hedge Recommendation Table
-    ###########################################
-    # Compute net delta (sum of delta * open_interest) from the ticker list.
-    df_options = pd.DataFrame(ticker_list)
-    if not df_options.empty:
-        net_delta = (df_options["delta"] * df_options["open_interest"]).sum()
-        # For a long volatility position, if net delta is positive, futures hedge should be short.
-        hedge_direction = "Short" if net_delta > 0 else ("Long" if net_delta < 0 else "Neutral")
-        hedge_table = pd.DataFrame({
-            "Net Delta": [net_delta],
-            "Futures Hedge Direction": [hedge_direction]
-        })
-        st.subheader("Futures Hedge Recommendation (Based on Net Delta)")
-        st.dataframe(hedge_table)
-    else:
-        st.write("No options data available for futures hedge recommendation.")
 
 if __name__ == '__main__':
     main()
