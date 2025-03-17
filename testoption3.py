@@ -668,21 +668,7 @@ def classify_vrp_regime(current_vrp, historical_vrps):
 ###########################################
 # Visualization Functions
 ###########################################
-def plot_gamma_heatmap(df):
-    st.subheader("Gamma Heatmap by Strike and Time")
-    if "gamma" not in df.columns:
-        st.error("DataFrame missing 'gamma' column for heatmap.")
-        return
-    fig_gamma_heatmap = px.density_heatmap(
-        df,
-        x="date_time",
-        y="k",
-        z="gamma",
-        color_continuous_scale="Viridis",
-        title="Gamma by Strike Over Time"
-    )
-    fig_gamma_heatmap.update_layout(height=400, width=800)
-    st.plotly_chart(fig_gamma_heatmap, use_container_width=True)
+
 
 def plot_net_gex(df_gex, spot_price):
     st.subheader("Net Gamma Exposure by Strike")
