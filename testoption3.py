@@ -1075,7 +1075,6 @@ def main():
         gex_data.append({"strike": strike, "gex": gex, "option_type": option_type})
     df_gex = pd.DataFrame(gex_data)
     if not df_gex.empty:
-        st.subheader("Net Gamma Exposure by Strike")
         plot_net_gex(df_gex, spot_price)
     
     ###########################################
