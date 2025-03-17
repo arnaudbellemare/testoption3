@@ -549,6 +549,14 @@ def build_smile_df(ticker_list):
     return smile_df
 
 ###########################################
+# EV Update Function for Composite Table
+###########################################
+def update_ev_for_position(ticker_list, rv, T, position_side):
+    for ticker in ticker_list:
+        ticker["EV"] = compute_ev(ticker["iv"], rv, T, position_side)
+    return ticker_list
+
+###########################################
 # Evaluate Trade Strategy
 ###########################################
 def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg_reset=None,
@@ -707,40 +715,26 @@ def classify_volatility_regime(current_vol, historical_vols):
         return "High Volatility"
     else:
         return "Medium Volatility"
-###########################################
-# DELTA BALANCE VISUALIZATION
-###########################################
+
 def plot_delta_balance(ticker_list, spot_price):
-    """
-    Creates a visualization comparing the total delta of puts vs calls,
-    showing which side has more directional exposure.
-    """
     st.subheader("Put vs Call Delta Balance")
     
     if not ticker_list:
         st.warning("No ticker data available to calculate delta balance.")
         return
         
-    # Split ticker list into calls and puts
     call_items = [item for item in ticker_list if item["option_type"] == "C"]
     put_items = [item for item in ticker_list if item["option_type"] == "P"]
     
-    # Calculate weighted delta (delta * open_interest)
     call_weighted_delta = sum(item["delta"] * item["open_interest"] for item in call_items)
-    put_weighted_delta = sum(item["delta"] * item["open_interest"] for item in put_items)
+    put_weighted_delta = abs(sum(item["delta"] * item["open_interest"] for item in put_items))
     
-    # For visualization purposes, we'll use the absolute value of put delta
-    # since puts have negative delta
-    put_weighted_delta_abs = abs(put_weighted_delta)
-    
-    # Create data for the chart
     delta_data = pd.DataFrame({
         'Option Type': ['Calls', 'Puts'],
-        'Total Weighted Delta': [call_weighted_delta, put_weighted_delta_abs],
+        'Total Weighted Delta': [call_weighted_delta, put_weighted_delta],
         'Direction': ['Bullish', 'Bearish']
     })
     
-    # Create the bar chart
     fig = px.bar(
         delta_data,
         x='Option Type',
@@ -751,10 +745,7 @@ def plot_delta_balance(ticker_list, spot_price):
         labels={'Total Weighted Delta': 'Absolute Total Delta * Open Interest'}
     )
     
-    # Add net delta line showing market bias
-    net_delta = call_weighted_delta + put_weighted_delta  # Note: put_weighted_delta is already negative
-    
-    # Add a text annotation for the market bias
+    net_delta = call_weighted_delta - put_weighted_delta
     bias_strength = abs(net_delta)
     if net_delta > 0:
         bias_text = f"Market Bias: Bullish (Net Delta: +{bias_strength:.2f})"
@@ -778,9 +769,8 @@ def plot_delta_balance(ticker_list, spot_price):
         borderpad=4
     )
     
-    # Calculate delta ratio (calls to puts)
-    if put_weighted_delta_abs > 0:
-        delta_ratio = call_weighted_delta / put_weighted_delta_abs
+    if put_weighted_delta > 0:
+        delta_ratio = call_weighted_delta / put_weighted_delta
         fig.add_annotation(
             x=0.5,
             y=0.95,
@@ -793,7 +783,6 @@ def plot_delta_balance(ticker_list, spot_price):
             bgcolor="rgba(255, 255, 255, 0.8)"
         )
     
-    # Add delta breakdown by strike price range
     fig_strikes = create_delta_by_strike_chart(call_items, put_items, spot_price)
     
     st.plotly_chart(fig, use_container_width=True)
@@ -801,13 +790,6 @@ def plot_delta_balance(ticker_list, spot_price):
         st.plotly_chart(fig_strikes, use_container_width=True)
 
 def create_delta_by_strike_chart(call_items, put_items, spot_price):
-    """
-    Creates a chart showing delta distribution by strike price range relative to spot.
-    """
-    if not call_items and not put_items:
-        return None
-        
-    # Define strike ranges relative to spot price
     ranges = [
         {"name": "Deep ITM", "min_pct": -float('inf'), "max_pct": -0.10},
         {"name": "ITM", "min_pct": -0.10, "max_pct": -0.02},
@@ -816,40 +798,23 @@ def create_delta_by_strike_chart(call_items, put_items, spot_price):
         {"name": "Deep OTM", "min_pct": 0.10, "max_pct": float('inf')}
     ]
     
-    # Initialize data structure
     range_data = []
-    
-    # Process call items
     for strike_range in ranges:
         min_strike = spot_price * (1 + strike_range["min_pct"])
         max_strike = spot_price * (1 + strike_range["max_pct"])
-        
-        # Filter calls in this range
-        calls_in_range = [item for item in call_items 
-                         if min_strike <= item["strike"] < max_strike]
-        
-        # Calculate total weighted delta
+        calls_in_range = [item for item in call_items if min_strike <= item["strike"] < max_strike]
         call_delta = sum(item["delta"] * item["open_interest"] for item in calls_in_range)
-        
         range_data.append({
             "Strike Range": strike_range["name"],
             "Option Type": "Calls",
             "Weighted Delta": call_delta,
             "Sort Order": ranges.index(strike_range)
         })
-    
-    # Process put items
     for strike_range in ranges:
         min_strike = spot_price * (1 + strike_range["min_pct"])
         max_strike = spot_price * (1 + strike_range["max_pct"])
-        
-        # Filter puts in this range
-        puts_in_range = [item for item in put_items 
-                         if min_strike <= item["strike"] < max_strike]
-        
-        # Calculate total weighted delta (use absolute value for visualization)
+        puts_in_range = [item for item in put_items if min_strike <= item["strike"] < max_strike]
         put_delta = abs(sum(item["delta"] * item["open_interest"] for item in puts_in_range))
-        
         range_data.append({
             "Strike Range": strike_range["name"],
             "Option Type": "Puts",
@@ -857,11 +822,8 @@ def create_delta_by_strike_chart(call_items, put_items, spot_price):
             "Sort Order": ranges.index(strike_range)
         })
     
-    # Create DataFrame and sort by range
     df_range = pd.DataFrame(range_data)
     df_range = df_range.sort_values("Sort Order")
-    
-    # Create grouped bar chart
     fig = px.bar(
         df_range,
         x="Strike Range",
@@ -872,8 +834,8 @@ def create_delta_by_strike_chart(call_items, put_items, spot_price):
         color_discrete_map={"Calls": "green", "Puts": "red"},
         category_orders={"Strike Range": [r["name"] for r in ranges]}
     )
-    
     return fig
+
 ###########################################
 # MAIN DASHBOARD
 ###########################################
@@ -968,6 +930,7 @@ def main():
     # Calculate realized volatility (rv) from Kraken data
     rv = calculate_btc_annualized_volatility_daily(df_kraken)
     
+    # Build ticker list for EV calculation (initially with "short" side)
     global ticker_list
     ticker_list = build_ticker_list_with_metrics(all_instruments, spot_price, T_YEARS, smile_df, rv, position_side="short")
     
@@ -1047,18 +1010,21 @@ def main():
         st.subheader("EV Analysis")
         st.write("EV analysis for the selected position is not implemented yet.")
     
-    if df_ev is not None and not df_ev.empty and not df_ev["EV (%)"].isna().all():
-        df_ev_clean = df_ev.dropna(subset=["EV (%)"])
-        if not df_ev_clean.empty:
-            best_candidate = df_ev_clean.loc[df_ev_clean["EV (%)"].idxmax()]
-            best_strike = best_candidate["Strike"]
-            st.write("Candidate Strikes and their Expected Value (EV %):")
-            st.dataframe(df_ev_clean.style.hide(axis="index"))
-            st.write(f"Recommended Strike based on highest EV: {best_strike}")
-        else:
-            st.write("No candidates found with valid EV values.")
+    # Update ticker_list EV for both short and long scenarios
+    short_ticker_list = update_ev_for_position(ticker_list.copy(), rv, T_YEARS, "short")
+    long_ticker_list = update_ev_for_position(ticker_list.copy(), rv, T_YEARS, "long")
+    short_scores = compute_composite_scores(short_ticker_list, position_side="short")
+    long_scores = compute_composite_scores(long_ticker_list, position_side="long")
+    df_short = pd.DataFrame(short_scores)
+    df_long = pd.DataFrame(long_scores)
+    df_combined = pd.concat([df_short, df_long], ignore_index=True)
+    if "EV" in df_combined.columns and "open_interest" in df_combined.columns:
+        columns_to_show = ["instrument", "strike", "option_type", "open_interest", "delta", "iv", "EV", "gex", "composite_score", "strategy"]
+        df_combined = df_combined[columns_to_show]
+        st.subheader("Combined Composite Score Table")
+        st.dataframe(df_combined.style.hide(axis="index"))
     else:
-        st.write("No candidates found within tolerance for EV calculation.")
+        st.write("Composite score data is not available.")
     
     if st.button("Simulate Trade"):
         st.write("Simulating trade based on recommendation...")
@@ -1112,23 +1078,8 @@ def main():
         gex_data.append({"strike": strike, "gex": gex, "option_type": option_type})
     df_gex = pd.DataFrame(gex_data)
     if not df_gex.empty:
+        st.subheader("Net Gamma Exposure by Strike")
         plot_net_gex(df_gex, spot_price)
     
-    ###########################################
-    # Composite Score Table (Using Actual Data)
-    ###########################################
-    short_scores = compute_composite_scores(ticker_list.copy(), position_side="short")
-    long_scores = compute_composite_scores(ticker_list.copy(), position_side="long")
-    df_short = pd.DataFrame(short_scores)
-    df_long = pd.DataFrame(long_scores)
-    df_combined = pd.concat([df_short, df_long], ignore_index=True)
-    if "EV" in df_combined.columns and "open_interest" in df_combined.columns:
-        columns_to_show = ["instrument", "strike", "option_type", "open_interest", "delta", "iv", "EV", "gex", "composite_score", "strategy"]
-        df_combined = df_combined[columns_to_show]
-        st.subheader("Combined Composite Score Table")
-        st.dataframe(df_combined.style.hide(axis="index"))
-    else:
-        st.write("Composite score data is not available.")
-
 if __name__ == '__main__':
     main()
