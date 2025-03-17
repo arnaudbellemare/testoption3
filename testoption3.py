@@ -382,8 +382,7 @@ def build_ticker_list_with_metrics(all_instruments, spot, T, smile_df):
         except Exception:
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
-        # EV calculation (placeholder, using 0.0 for realized volatility)
-        ev_value = (((adjusted_iv**2 - 0.0) * T) / 2) * 100
+        ev_value = (((adjusted_iv**2 - 0.0) * T) / 2) * 100  # Placeholder EV formula
         gamma_val = compute_gamma_value(spot, strike, adjusted_iv, T) if adjusted_iv > 0 and T > 0 else 0
         gex_value = gamma_val * ticker_data["open_interest"] * (spot**2)
         ticker_list.append({
@@ -588,7 +587,8 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     else:
         market_regime = "Neutral"
     vol_regime = market_regime
-    vrp_regime = classify_vrp_regime(current_vrp, historical_vols) if historical_vols and len(historical_vols) > 0 else "Neutral"
+    # Fix: explicitly check if historical_vols is not None and not empty.
+    vrp_regime = classify_vrp_regime(current_vrp, historical_vols) if (historical_vols is not None and len(historical_vols) > 0) else "Neutral"
     call_items = [item for item in ticker_list if item["option_type"] == "C"]
     put_items = [item for item in ticker_list if item["option_type"] == "P"]
     call_oi_total = sum(item["open_interest"] for item in call_items)
