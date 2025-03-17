@@ -1064,7 +1064,7 @@ def main():
         st.write("Simulating trade based on recommendation...")
         st.write("Position Size: Adjust based on capital (e.g., 1-5% of portfolio for chosen risk tolerance)")
         st.write("Monitor price and volatility in real-time and adjust hedges dynamically.")
-    plot_delta_balance(ticker_list, spot_price)
+    
     st.subheader("Volatility Smile at Latest Timestamp")
     latest_ts = df["date_time"].max()
     smile_df_latest = df[df["date_time"] == latest_ts]
@@ -1081,6 +1081,7 @@ def main():
                                 annotation_text=f"Price: {spot_price:.2f}", annotation_position="bottom left")
         fig_vol_smile.update_layout(height=400, width=600)
         st.plotly_chart(fig_vol_smile, use_container_width=True)
+        plot_delta_balance(ticker_list, spot_price)
         if "gamma" not in df_calls.columns:
             df_calls["gamma"] = df_calls.apply(lambda row: compute_delta(row, spot_price), axis=1)
         if "gamma" not in df_puts.columns:
