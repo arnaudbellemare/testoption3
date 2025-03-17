@@ -707,7 +707,173 @@ def classify_volatility_regime(current_vol, historical_vols):
         return "High Volatility"
     else:
         return "Medium Volatility"
+###########################################
+# DELTA BALANCE VISUALIZATION
+###########################################
+def plot_delta_balance(ticker_list, spot_price):
+    """
+    Creates a visualization comparing the total delta of puts vs calls,
+    showing which side has more directional exposure.
+    """
+    st.subheader("Put vs Call Delta Balance")
+    
+    if not ticker_list:
+        st.warning("No ticker data available to calculate delta balance.")
+        return
+        
+    # Split ticker list into calls and puts
+    call_items = [item for item in ticker_list if item["option_type"] == "C"]
+    put_items = [item for item in ticker_list if item["option_type"] == "P"]
+    
+    # Calculate weighted delta (delta * open_interest)
+    call_weighted_delta = sum(item["delta"] * item["open_interest"] for item in call_items)
+    put_weighted_delta = sum(item["delta"] * item["open_interest"] for item in put_items)
+    
+    # For visualization purposes, we'll use the absolute value of put delta
+    # since puts have negative delta
+    put_weighted_delta_abs = abs(put_weighted_delta)
+    
+    # Create data for the chart
+    delta_data = pd.DataFrame({
+        'Option Type': ['Calls', 'Puts'],
+        'Total Weighted Delta': [call_weighted_delta, put_weighted_delta_abs],
+        'Direction': ['Bullish', 'Bearish']
+    })
+    
+    # Create the bar chart
+    fig = px.bar(
+        delta_data,
+        x='Option Type',
+        y='Total Weighted Delta',
+        color='Direction',
+        color_discrete_map={'Bullish': 'green', 'Bearish': 'red'},
+        title='Put vs Call Delta Balance (Open Interest Weighted)',
+        labels={'Total Weighted Delta': 'Absolute Total Delta * Open Interest'}
+    )
+    
+    # Add net delta line showing market bias
+    net_delta = call_weighted_delta + put_weighted_delta  # Note: put_weighted_delta is already negative
+    
+    # Add a text annotation for the market bias
+    bias_strength = abs(net_delta)
+    if net_delta > 0:
+        bias_text = f"Market Bias: Bullish (Net Delta: +{bias_strength:.2f})"
+        bias_color = "green"
+    else:
+        bias_text = f"Market Bias: Bearish (Net Delta: {net_delta:.2f})"
+        bias_color = "red"
+    
+    fig.add_annotation(
+        x=0.5,
+        y=1.05,
+        xref="paper",
+        yref="paper",
+        text=bias_text,
+        showarrow=False,
+        font=dict(size=14, color=bias_color),
+        align="center",
+        bgcolor="rgba(255, 255, 255, 0.8)",
+        bordercolor=bias_color,
+        borderwidth=2,
+        borderpad=4
+    )
+    
+    # Calculate delta ratio (calls to puts)
+    if put_weighted_delta_abs > 0:
+        delta_ratio = call_weighted_delta / put_weighted_delta_abs
+        fig.add_annotation(
+            x=0.5,
+            y=0.95,
+            xref="paper",
+            yref="paper",
+            text=f"Call/Put Delta Ratio: {delta_ratio:.2f}",
+            showarrow=False,
+            font=dict(size=12),
+            align="center",
+            bgcolor="rgba(255, 255, 255, 0.8)"
+        )
+    
+    # Add delta breakdown by strike price range
+    fig_strikes = create_delta_by_strike_chart(call_items, put_items, spot_price)
+    
+    st.plotly_chart(fig, use_container_width=True)
+    if fig_strikes:
+        st.plotly_chart(fig_strikes, use_container_width=True)
 
+def create_delta_by_strike_chart(call_items, put_items, spot_price):
+    """
+    Creates a chart showing delta distribution by strike price range relative to spot.
+    """
+    if not call_items and not put_items:
+        return None
+        
+    # Define strike ranges relative to spot price
+    ranges = [
+        {"name": "Deep ITM", "min_pct": -float('inf'), "max_pct": -0.10},
+        {"name": "ITM", "min_pct": -0.10, "max_pct": -0.02},
+        {"name": "Near ATM", "min_pct": -0.02, "max_pct": 0.02},
+        {"name": "OTM", "min_pct": 0.02, "max_pct": 0.10},
+        {"name": "Deep OTM", "min_pct": 0.10, "max_pct": float('inf')}
+    ]
+    
+    # Initialize data structure
+    range_data = []
+    
+    # Process call items
+    for strike_range in ranges:
+        min_strike = spot_price * (1 + strike_range["min_pct"])
+        max_strike = spot_price * (1 + strike_range["max_pct"])
+        
+        # Filter calls in this range
+        calls_in_range = [item for item in call_items 
+                         if min_strike <= item["strike"] < max_strike]
+        
+        # Calculate total weighted delta
+        call_delta = sum(item["delta"] * item["open_interest"] for item in calls_in_range)
+        
+        range_data.append({
+            "Strike Range": strike_range["name"],
+            "Option Type": "Calls",
+            "Weighted Delta": call_delta,
+            "Sort Order": ranges.index(strike_range)
+        })
+    
+    # Process put items
+    for strike_range in ranges:
+        min_strike = spot_price * (1 + strike_range["min_pct"])
+        max_strike = spot_price * (1 + strike_range["max_pct"])
+        
+        # Filter puts in this range
+        puts_in_range = [item for item in put_items 
+                         if min_strike <= item["strike"] < max_strike]
+        
+        # Calculate total weighted delta (use absolute value for visualization)
+        put_delta = abs(sum(item["delta"] * item["open_interest"] for item in puts_in_range))
+        
+        range_data.append({
+            "Strike Range": strike_range["name"],
+            "Option Type": "Puts",
+            "Weighted Delta": put_delta,
+            "Sort Order": ranges.index(strike_range)
+        })
+    
+    # Create DataFrame and sort by range
+    df_range = pd.DataFrame(range_data)
+    df_range = df_range.sort_values("Sort Order")
+    
+    # Create grouped bar chart
+    fig = px.bar(
+        df_range,
+        x="Strike Range",
+        y="Weighted Delta",
+        color="Option Type",
+        barmode="group",
+        title="Delta Distribution by Strike Range",
+        color_discrete_map={"Calls": "green", "Puts": "red"},
+        category_orders={"Strike Range": [r["name"] for r in ranges]}
+    )
+    
+    return fig
 ###########################################
 # MAIN DASHBOARD
 ###########################################
@@ -898,7 +1064,7 @@ def main():
         st.write("Simulating trade based on recommendation...")
         st.write("Position Size: Adjust based on capital (e.g., 1-5% of portfolio for chosen risk tolerance)")
         st.write("Monitor price and volatility in real-time and adjust hedges dynamically.")
-    
+    plot_delta_balance(ticker_list, spot_price)
     st.subheader("Volatility Smile at Latest Timestamp")
     latest_ts = df["date_time"].max()
     smile_df_latest = df[df["date_time"] == latest_ts]
