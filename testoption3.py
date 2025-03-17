@@ -350,18 +350,18 @@ def compute_gex(row, S, oi):
 # EV and Gamma Exposure (GEX) Calculations
 ###########################################
 def adjust_ev(ev_value, position_side):
-    return -ev_value if position_side.lower() == "long" else ev_value
+    return ev_value  # EV sign will be determined by the compute_ev function
 
-def compute_gamma_value(spot, strike, sigma, T):
-    d1 = (np.log(spot/strike) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
-    return norm.pdf(d1) / (spot * sigma * np.sqrt(T))
-
-# New EV computation using realized volatility (rv)
+# Updated compute_ev using realized volatility (rv)
 def compute_ev(adjusted_iv, rv, T, position_side):
     if position_side.lower() == "short":
         return (((adjusted_iv**2 - rv**2) * T) / 2) * 100
     else:
-        return -(((rv**2 - adjusted_iv**2) * T) / 2) * 100
+        return (((rv**2 - adjusted_iv**2) * T) / 2) * 100
+
+def compute_gamma_value(spot, strike, sigma, T):
+    d1 = (np.log(spot/strike) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
+    return norm.pdf(d1) / (spot * sigma * np.sqrt(T))
 
 def adjust_volatility_with_smile(strike, smile_df):
     sorted_smile = smile_df.sort_values("strike")
@@ -389,7 +389,7 @@ def build_ticker_list_with_metrics(all_instruments, spot, T, smile_df, rv, posit
         except Exception:
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
-        ev_value = compute_ev(adjusted_iv, rv, T, position_side)  # EV computed using realized vol (rv)
+        ev_value = compute_ev(adjusted_iv, rv, T, position_side)  # EV using realized volatility
         gamma_val = compute_gamma_value(spot, strike, adjusted_iv, T) if adjusted_iv > 0 and T > 0 else 0
         gex_value = gamma_val * ticker_data["open_interest"] * (spot**2)
         ticker_list.append({
@@ -826,7 +826,7 @@ def main():
         })
     smile_df = build_smile_df(preliminary_ticker_list)
     
-    # Compute realized volatility (rv) from Kraken data
+    # Calculate realized volatility (rv) from Kraken data
     rv = calculate_btc_annualized_volatility_daily(df_kraken)
     
     global ticker_list
@@ -863,6 +863,22 @@ def main():
     st.write(f"**Recommendation:** {trade_decision['recommendation']}")
     st.write(f"**Position:** {trade_decision['position']}")
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
+    
+    # Futures Hedge Recommendation based on net delta
+    # For a long vol position, if net delta is positive, futures should be short, and vice versa.
+    net_delta = df_ticker.assign(weighted_delta = df_ticker["delta"] * df_ticker["open_interest"])["weighted_delta"].sum()
+    if net_delta > 0:
+        futures_hedge = "Short BTC Futures"
+    elif net_delta < 0:
+        futures_hedge = "Long BTC Futures"
+    else:
+        futures_hedge = "No hedge required"
+    hedge_table = pd.DataFrame({
+        "Metric": ["Net Delta", "Futures Hedge Recommendation"],
+        "Value": [net_delta, futures_hedge]
+    })
+    st.subheader("Futures Hedge Recommendation")
+    st.dataframe(hedge_table)
     
     rv_series = calculate_daily_realized_volatility_series(df_kraken)
     rv_scalar = rv_series.iloc[-1] if not rv_series.empty else np.nan
@@ -907,23 +923,7 @@ def main():
         st.write("Simulating trade based on recommendation...")
         st.write("Position Size: Adjust based on capital (e.g., 1-5% of portfolio for chosen risk tolerance)")
         st.write("Monitor price and volatility in real-time and adjust hedges dynamically.")
-    ###########################################
-    # Futures Hedge Recommendation Table
-    ###########################################
-    # Compute net delta (sum of delta * open_interest) from the ticker list.
-    df_options = pd.DataFrame(ticker_list)
-    if not df_options.empty:
-        net_delta = (df_options["delta"] * df_options["open_interest"]).sum()
-        # For a long volatility position, if net delta is positive, futures hedge should be short.
-        hedge_direction = "Short" if net_delta > 0 else ("Long" if net_delta < 0 else "Neutral")
-        hedge_table = pd.DataFrame({
-            "Net Delta": [net_delta],
-            "Futures Hedge Direction": [hedge_direction]
-        })
-        st.subheader("Futures Hedge Recommendation (Based on Net Delta)")
-        st.dataframe(hedge_table)
-    else:
-        st.write("No options data available for futures hedge recommendation.")
+    
     st.subheader("Volatility Smile at Latest Timestamp")
     latest_ts = df["date_time"].max()
     smile_df_latest = df[df["date_time"] == latest_ts]
@@ -987,7 +987,6 @@ def main():
         st.dataframe(df_combined)
     else:
         st.write("Composite score data is not available.")
-    
 
 if __name__ == '__main__':
     main()
