@@ -83,13 +83,13 @@ def calibrate_gbm(df):
     return mu, sigma
 
 def forecast_gbm(S0, mu, sigma, T, steps=100, simulations=1000):
-    dt = T / steps
+    dt_ = T / steps
     paths = np.zeros((simulations, steps + 1))
     paths[:, 0] = S0
     np.random.seed(42)
     for t in range(steps):
         z = np.random.normal(size=simulations)
-        paths[:, t + 1] = paths[:, t] * np.exp((mu - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * z)
+        paths[:, t + 1] = paths[:, t] * np.exp((mu - 0.5 * sigma**2) * dt_ + sigma * np.sqrt(dt_) * z)
     return paths
 
 ###########################################
@@ -98,7 +98,7 @@ def forecast_gbm(S0, mu, sigma, T, steps=100, simulations=1000):
 def heston_price(S, K, T, r, kappa, theta, xi, v0, rho, option_type="C"):
     N = 10000
     steps = 100
-    dt = T / steps
+    dt_ = T / steps
     prices = np.zeros(N)
     np.random.seed(42)
     for i in range(N):
@@ -107,8 +107,8 @@ def heston_price(S, K, T, r, kappa, theta, xi, v0, rho, option_type="C"):
         for _ in range(steps):
             z1 = np.random.normal()
             z2 = rho * z1 + np.sqrt(1 - rho**2) * np.random.normal()
-            S_t = S_t * np.exp((r - 0.5 * v_t) * dt + np.sqrt(v_t * dt) * z1)
-            v_t = max(v_t + kappa * (theta - v_t) * dt + xi * np.sqrt(v_t * dt) * z2, 0)
+            S_t = S_t * np.exp((r - 0.5 * v_t) * dt_ + np.sqrt(v_t * dt_) * z1)
+            v_t = max(v_t + kappa * (theta - v_t) * dt_ + xi * np.sqrt(v_t * dt_) * z2, 0)
         if option_type == "C":
             prices[i] = max(S_t - K, 0)
         else:
@@ -152,7 +152,7 @@ def calibrate_heston(params, spot, strikes, ivs, T, returns, r=0):
     return sum(errors)
 
 def forecast_heston(S0, kappa, theta, xi, v0, rho, T, steps=100, simulations=1000, r=0):
-    dt = T / steps
+    dt_ = T / steps
     paths = np.zeros((simulations, steps + 1))
     vols = np.zeros((simulations, steps + 1))
     paths[:, 0] = S0
@@ -161,8 +161,8 @@ def forecast_heston(S0, kappa, theta, xi, v0, rho, T, steps=100, simulations=100
     for t in range(steps):
         z1 = np.random.normal(size=simulations)
         z2 = rho * z1 + np.sqrt(1 - rho**2) * np.random.normal(size=simulations)
-        paths[:, t + 1] = paths[:, t] * np.exp((r - 0.5 * vols[:, t]) * dt + np.sqrt(vols[:, t] * dt) * z1)
-        vols[:, t + 1] = np.maximum(vols[:, t] + kappa * (theta - vols[:, t]) * dt + xi * np.sqrt(vols[:, t] * dt) * z2, 0)
+        paths[:, t + 1] = paths[:, t] * np.exp((r - 0.5 * vols[:, t]) * dt_ + np.sqrt(vols[:, t] * dt_) * z1)
+        vols[:, t + 1] = np.maximum(vols[:, t] + kappa * (theta - vols[:, t]) * dt_ + xi * np.sqrt(vols[:, t] * dt_) * z2, 0)
     return paths
 
 def evaluate_forecast_accuracy(df, gbm_paths, heston_paths, horizons):
@@ -349,8 +349,8 @@ def fetch_data(instruments_tuple):
 
 @st.cache_data(ttl=30)
 def fetch_ticker(instrument_name):
-    params = {"instrument_name": instrument_name}
-    response = requests.get(URL_TICKER, params=params)
+    params_ = {"instrument_name": instrument_name}
+    response = requests.get(URL_TICKER, params=params_)
     if response.status_code != 200:
         return None
     data = response.json()
@@ -736,10 +736,11 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     put_call_ratio = put_oi / call_oi if call_oi > 0 else np.inf
     df_calls = df[df["option_type"] == "C"].copy()
     df_puts = df[df["option_type"] == "P"].copy()
+    # Use compute_gamma here to get gamma instead of delta for gamma analysis
     if "gamma" not in df_calls.columns:
-        df_calls["gamma"] = df_calls.apply(lambda row: compute_delta(row, spot_price), axis=1)
+        df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
     if "gamma" not in df_puts.columns:
-        df_puts["gamma"] = df_puts.apply(lambda row: compute_delta(row, spot_price), axis=1)
+        df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
     avg_call_gamma = df_calls["gamma"].mean() if not df_calls.empty else 0
     avg_put_gamma = df_puts["gamma"].mean() if not df_puts.empty else 0
     if vrp_regime == "Long Volatility":
@@ -1230,9 +1231,9 @@ def main():
         st.plotly_chart(fig_vol_smile, use_container_width=True)
         plot_delta_balance(ticker_list, spot_price)
         if "gamma" not in df_calls.columns:
-            df_calls["gamma"] = df_calls.apply(lambda row: compute_delta(row, spot_price), axis=1)
+            df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
         if "gamma" not in df_puts.columns:
-            df_puts["gamma"] = df_puts.apply(lambda row: compute_delta(row, spot_price), axis=1)
+            df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
         plot_gamma_heatmap(pd.concat([df_calls, df_puts]))
     
     gex_data = []
