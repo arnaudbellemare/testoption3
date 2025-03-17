@@ -31,6 +31,8 @@ T_YEARS = days_to_expiry / 365
 
 windows = {"7D": "vrp_7d"}
 
+FORECAST_HORIZONS = [7, 30, 45, 60]  # Days
+
 ###########################################
 # Helper Functions
 ###########################################
@@ -72,13 +74,31 @@ def compute_risk_adjustment_factor_cf(df, alpha=0.05):
     return risk_factor
 
 ###########################################
-# Heston Model Implementation
+# Baseline Drift-Diffusion Model (GBM)
+###########################################
+def calibrate_gbm(df):
+    returns = df['close'].pct_change().dropna()
+    mu = returns.mean() * 365  # Annualized drift
+    sigma = returns.std() * np.sqrt(365)  # Annualized volatility
+    return mu, sigma
+
+def forecast_gbm(S0, mu, sigma, T, steps=50, simulations=100):
+    dt_ = T / steps
+    paths = np.zeros((simulations, steps + 1))
+    paths[:, 0] = S0
+    np.random.seed(42)
+    for t in range(steps):
+        z = np.random.normal(size=simulations)
+        paths[:, t + 1] = paths[:, t] * np.exp((mu - 0.5 * sigma**2) * dt_ + sigma * np.sqrt(dt_) * z)
+    return paths
+
+###########################################
+# Heston Stochastic Volatility Model
 ###########################################
 def heston_price(S, K, T, r, kappa, theta, xi, v0, rho, option_type="C"):
-    # Simplified Heston pricing via Monte Carlo (for demonstration; replace with QuantLib if needed)
-    N = 10000  # Number of simulations
+    N = 10000
     steps = 100
-    dt = T / steps
+    dt_ = T / steps
     prices = np.zeros(N)
     np.random.seed(42)
     for i in range(N):
@@ -87,8 +107,8 @@ def heston_price(S, K, T, r, kappa, theta, xi, v0, rho, option_type="C"):
         for _ in range(steps):
             z1 = np.random.normal()
             z2 = rho * z1 + np.sqrt(1 - rho**2) * np.random.normal()
-            S_t = S_t * np.exp((r - 0.5 * v_t) * dt + np.sqrt(v_t * dt) * z1)
-            v_t = max(v_t + kappa * (theta - v_t) * dt + xi * np.sqrt(v_t * dt) * z2, 0)
+            S_t = S_t * np.exp((r - 0.5 * v_t) * dt_ + np.sqrt(v_t * dt_) * z1)
+            v_t = max(v_t + kappa * (theta - v_t) * dt_ + xi * np.sqrt(v_t * dt_) * z2, 0)
         if option_type == "C":
             prices[i] = max(S_t - K, 0)
         else:
@@ -96,15 +116,13 @@ def heston_price(S, K, T, r, kappa, theta, xi, v0, rho, option_type="C"):
     return np.exp(-r * T) * np.mean(prices)
 
 def implied_vol_from_price(price, S, K, T, r):
-    # Simple bisection method to estimate IV from price
     def bs_price(iv):
         d1 = (np.log(S / K) + (r + 0.5 * iv**2) * T) / (iv * np.sqrt(T))
         d2 = d1 - iv * np.sqrt(T)
-        if K < S:  # Call
+        if K < S:
             return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
-        else:  # Put
+        else:
             return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
-    
     low, high = 0.001, 2.0
     for _ in range(50):
         mid = (low + high) / 2
@@ -114,22 +132,77 @@ def implied_vol_from_price(price, S, K, T, r):
             low = mid
     return (low + high) / 2
 
-def calibrate_heston(params, spot, strikes, ivs, T, r=0):
+def calibrate_heston(params, spot, strikes, ivs, T, returns, r=0):
     kappa, theta, xi, v0, rho = params
     errors = []
+    # Fit to option IVs
     for K, iv in zip(strikes, ivs):
         model_price = heston_price(spot, K, T, r, kappa, theta, xi, v0, rho)
         bs_iv = implied_vol_from_price(model_price, spot, K, T, r)
         errors.append((bs_iv - iv) ** 2)
+    # Fit to return moments (skewness and kurtosis)
+    simulated_paths = forecast_heston(spot, kappa, theta, xi, v0, rho, T=1, steps=100, simulations=100)
+    sim_returns = np.diff(np.log(simulated_paths), axis=1).flatten()
+    hist_skew = returns.skew()
+    hist_kurt = returns.kurtosis()
+    sim_skew = pd.Series(sim_returns).skew()
+    sim_kurt = pd.Series(sim_returns).kurtosis()
+    errors.append((hist_skew - sim_skew) ** 2)
+    errors.append((hist_kurt - sim_kurt) ** 2)
     return sum(errors)
 
-def forecast_heston_vol(kappa, theta, xi, v0, T, steps=100):
-    dt = T / steps
-    v = v0
-    for _ in range(steps):
-        dv = kappa * (theta - v) * dt + xi * np.sqrt(v) * np.sqrt(dt) * np.random.normal()
-        v = max(v + dv, 0)
-    return np.sqrt(v)
+def forecast_heston(S0, kappa, theta, xi, v0, rho, T, steps=50, simulations=100, r=0):
+    dt_ = T / steps
+    paths = np.zeros((simulations, steps + 1))
+    vols = np.zeros((simulations, steps + 1))
+    paths[:, 0] = S0
+    vols[:, 0] = v0
+    np.random.seed(42)
+    for t in range(steps):
+        z1 = np.random.normal(size=simulations)
+        z2 = rho * z1 + np.sqrt(1 - rho**2) * np.random.normal(size=simulations)
+        paths[:, t + 1] = paths[:, t] * np.exp((r - 0.5 * vols[:, t]) * dt_ + np.sqrt(vols[:, t] * dt_) * z1)
+        vols[:, t + 1] = np.maximum(vols[:, t] + kappa * (theta - vols[:, t]) * dt_ + xi * np.sqrt(vols[:, t] * dt_) * z2, 0)
+    return paths
+
+def evaluate_forecast_accuracy(df, gbm_paths, heston_paths, horizons):
+    actual_prices = df['close'].resample('D').last().dropna()
+    actual_dates = actual_prices.index
+    S0 = actual_prices.iloc[-1]
+    results = {}
+    for T_days in horizons:
+        T = T_days / 365
+        steps = T_days
+        # Slice historical data for backtest
+        backtest_start = max(0, len(actual_prices) - T_days - 1)
+        actual_future = actual_prices.iloc[backtest_start:backtest_start + T_days].values
+        if len(actual_future) < T_days:
+            continue
+        # GBM forecast
+        gbm_median = np.median(gbm_paths[T_days][:, -1])
+        gbm_p5 = np.percentile(gbm_paths[T_days][:, -1], 5)
+        gbm_p95 = np.percentile(gbm_paths[T_days][:, -1], 95)
+        # Heston forecast
+        heston_median = np.median(heston_paths[T_days][:, -1])
+        heston_p5 = np.percentile(heston_paths[T_days][:, -1], 5)
+        heston_p95 = np.percentile(heston_paths[T_days][:, -1], 95)
+        # Errors
+        actual_end = actual_future[-1]
+        gbm_median_error = abs(gbm_median - actual_end) / actual_end
+        gbm_p5_error = abs(gbm_p5 - actual_end) / actual_end if actual_end < S0 else np.inf
+        gbm_p95_error = abs(gbm_p95 - actual_end) / actual_end if actual_end > S0 else np.inf
+        heston_median_error = abs(heston_median - actual_end) / actual_end
+        heston_p5_error = abs(heston_p5 - actual_end) / actual_end if actual_end < S0 else np.inf
+        heston_p95_error = abs(heston_p95 - actual_end) / actual_end if actual_end > S0 else np.inf
+        results[T_days] = {
+            "GBM Median Error": gbm_median_error,
+            "GBM 5th Pctl Error": gbm_p5_error,
+            "GBM 95th Pctl Error": gbm_p95_error,
+            "Heston Median Error": heston_median_error,
+            "Heston 5th Pctl Error": heston_p5_error,
+            "Heston 95th Pctl Error": heston_p95_error
+        }
+    return results
 
 ###########################################
 # Expiration Date Helpers
@@ -276,8 +349,8 @@ def fetch_data(instruments_tuple):
 
 @st.cache_data(ttl=30)
 def fetch_ticker(instrument_name):
-    params = {"instrument_name": instrument_name}
-    response = requests.get(URL_TICKER, params=params)
+    params_ = {"instrument_name": instrument_name}
+    response = requests.get(URL_TICKER, params=params_)
     if response.status_code != 200:
         return None
     data = response.json()
@@ -441,7 +514,6 @@ def build_ticker_list_with_metrics(all_instruments, spot, T, smile_df, rv, hesto
         if raw_iv is None:
             continue
         adjusted_iv = adjust_volatility_with_smile(strike, smile_df)
-        # Use Heston forecasted volatility if available, else fall back to adjusted IV
         iv_to_use = heston_vol if heston_vol is not None else adjusted_iv
         try:
             d1 = (np.log(spot / strike) + 0.5 * iv_to_use**2 * T) / (iv_to_use * np.sqrt(T))
@@ -664,10 +736,11 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     put_call_ratio = put_oi / call_oi if call_oi > 0 else np.inf
     df_calls = df[df["option_type"] == "C"].copy()
     df_puts = df[df["option_type"] == "P"].copy()
+    # Use compute_gamma here to get gamma instead of delta for gamma analysis
     if "gamma" not in df_calls.columns:
-        df_calls["gamma"] = df_calls.apply(lambda row: compute_delta(row, spot_price), axis=1)
+        df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
     if "gamma" not in df_puts.columns:
-        df_puts["gamma"] = df_puts.apply(lambda row: compute_delta(row, spot_price), axis=1)
+        df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
     avg_call_gamma = df_calls["gamma"].mean() if not df_calls.empty else 0
     avg_put_gamma = df_puts["gamma"].mean() if not df_puts.empty else 0
     if vrp_regime == "Long Volatility":
@@ -892,7 +965,7 @@ def create_delta_by_strike_chart(call_items, put_items, spot_price):
 ###########################################
 def main():
     login()
-    st.title("Crypto Options Visualization Dashboard with Enhanced Risk Adjustments and Heston Model")
+    st.title("Crypto Options Visualization Dashboard with Heston-Enhanced Price Forecasting")
     if st.button("Logout"):
         st.session_state.logged_in = False
         st.stop()
@@ -928,6 +1001,78 @@ def main():
     risk_factor = compute_risk_adjustment_factor_cf(df_kraken, alpha=0.05)
     st.write(f"Risk Adjustment Factor (CF): {risk_factor:.2f}")
     
+    # Baseline GBM Calibration and Forecasting
+    mu, sigma = calibrate_gbm(df_kraken)
+    gbm_forecasts = {}
+    for T_days in FORECAST_HORIZONS:
+        T = T_days / 365
+        gbm_forecasts[T_days] = forecast_gbm(spot_price, mu, sigma, T, steps=T_days)
+    
+    # Heston Calibration and Forecasting
+    returns = df_kraken['close'].pct_change().dropna()
+    preliminary_ticker_list = []
+    for instrument in fetch_instruments():
+        ticker_data = fetch_ticker(instrument["instrument_name"])
+        if not (ticker_data and "open_interest" in ticker_data):
+            continue
+        try:
+            strike = int(instrument["instrument_name"].split("-")[2])
+        except Exception:
+            continue
+        option_type = instrument["instrument_name"].split("-")[-1]
+        raw_iv = ticker_data.get("iv", None)
+        if raw_iv is None:
+            continue
+        preliminary_ticker_list.append({
+            "instrument": instrument["instrument_name"],
+            "strike": strike,
+            "option_type": option_type,
+            "open_interest": ticker_data["open_interest"],
+            "iv": raw_iv
+        })
+    smile_df = build_smile_df(preliminary_ticker_list)
+    spot = spot_price
+    strikes = smile_df["strike"].values
+    ivs = smile_df["iv"].values
+    initial_params = [1.5, 0.04, 0.3, 0.04, -0.7]  # [kappa, theta, xi, v0, rho]
+    bounds = [(0.1, 5), (0, 1), (0, 1), (0, 1), (-1, 1)]
+    result = minimize(calibrate_heston, initial_params, args=(spot, strikes, ivs, T_YEARS, returns),
+                      bounds=bounds, method='L-BFGS-B')
+    kappa, theta, xi, v0, rho = result.x
+    heston_forecasts = {}
+    for T_days in FORECAST_HORIZONS:
+        T = T_days / 365
+        heston_forecasts[T_days] = forecast_heston(spot_price, kappa, theta, xi, v0, rho, T, steps=T_days)
+    heston_vol = np.mean(np.sqrt(np.maximum(heston_forecasts[7][:, 1:], 0)))  # Avg vol over 7 days
+    
+    # Backtest Accuracy
+    accuracy_results = evaluate_forecast_accuracy(df_kraken, gbm_forecasts, heston_forecasts, FORECAST_HORIZONS)
+    st.subheader("Forecast Accuracy Comparison")
+    accuracy_df = pd.DataFrame(accuracy_results).T
+    st.dataframe(accuracy_df.style.format("{:.4f}"))
+    
+    # Display Forecasts
+    st.subheader("Bitcoin Price Forecasts")
+    forecast_data = []
+    for T_days in FORECAST_HORIZONS:
+        gbm_median = np.median(gbm_forecasts[T_days][:, -1])
+        gbm_p5 = np.percentile(gbm_forecasts[T_days][:, -1], 5)
+        gbm_p95 = np.percentile(gbm_forecasts[T_days][:, -1], 95)
+        heston_median = np.median(heston_forecasts[T_days][:, -1])
+        heston_p5 = np.percentile(heston_forecasts[T_days][:, -1], 5)
+        heston_p95 = np.percentile(heston_forecasts[T_days][:, -1], 95)
+        forecast_data.append({
+            "Horizon (Days)": T_days,
+            "GBM Median": gbm_median,
+            "GBM 5th Pctl": gbm_p5,
+            "GBM 95th Pctl": gbm_p95,
+            "Heston Median": heston_median,
+            "Heston 5th Pctl": heston_p5,
+            "Heston 95th Pctl": heston_p95
+        })
+    forecast_df = pd.DataFrame(forecast_data)
+    st.dataframe(forecast_df.style.format("{:.2f}", subset=["GBM Median", "GBM 5th Pctl", "GBM 95th Pctl", "Heston Median", "Heston 5th Pctl", "Heston 95th Pctl"]))
+    
     try:
         filtered_calls, filtered_puts = get_filtered_instruments(spot_price, expiry_str, T_YEARS, multiplier)
     except Exception as e:
@@ -956,43 +1101,7 @@ def main():
     df_iv_agg["lower_zone"] = df_iv_agg["iv_rolling_mean"] - df_iv_agg["iv_rolling_std"]
     df_iv_agg_reset = df_iv_agg.reset_index()
     
-    preliminary_ticker_list = []
-    for instrument in all_instruments:
-        ticker_data = fetch_ticker(instrument)
-        if not (ticker_data and "open_interest" in ticker_data):
-            continue
-        try:
-            strike = int(instrument.split("-")[2])
-        except Exception:
-            continue
-        option_type = instrument.split("-")[-1]
-        raw_iv = ticker_data.get("iv", None)
-        if raw_iv is None:
-            continue
-        preliminary_ticker_list.append({
-            "instrument": instrument,
-            "strike": strike,
-            "option_type": option_type,
-            "open_interest": ticker_data["open_interest"],
-            "iv": raw_iv
-        })
-    smile_df = build_smile_df(preliminary_ticker_list)
-    
-    # Calculate realized volatility (rv) from Kraken data
     rv = calculate_btc_annualized_volatility_daily(df_kraken)
-    
-    # Calibrate Heston Model
-    spot = spot_price
-    strikes = smile_df["strike"].values
-    ivs = smile_df["iv"].values
-    initial_params = [1.5, 0.04, 0.3, 0.04, -0.7]  # [kappa, theta, xi, v0, rho]
-    bounds = [(0.1, 5), (0, 1), (0, 1), (0, 1), (-1, 1)]
-    result = minimize(calibrate_heston, initial_params, args=(spot, strikes, ivs, T_YEARS),
-                      bounds=bounds, method='L-BFGS-B')
-    kappa, theta, xi, v0, rho = result.x
-    heston_vol = forecast_heston_vol(kappa, theta, xi, v0, T_YEARS)
-    st.write(f"Heston Forecasted Volatility: {heston_vol:.4f}")
-    
     global ticker_list
     ticker_list = build_ticker_list_with_metrics(all_instruments, spot_price, T_YEARS, smile_df, rv, heston_vol, position_side="short")
     
@@ -1122,9 +1231,9 @@ def main():
         st.plotly_chart(fig_vol_smile, use_container_width=True)
         plot_delta_balance(ticker_list, spot_price)
         if "gamma" not in df_calls.columns:
-            df_calls["gamma"] = df_calls.apply(lambda row: compute_delta(row, spot_price), axis=1)
+            df_calls["gamma"] = df_calls.apply(lambda row: compute_gamma(row, spot_price), axis=1)
         if "gamma" not in df_puts.columns:
-            df_puts["gamma"] = df_puts.apply(lambda row: compute_delta(row, spot_price), axis=1)
+            df_puts["gamma"] = df_puts.apply(lambda row: compute_gamma(row, spot_price), axis=1)
         plot_gamma_heatmap(pd.concat([df_calls, df_puts]))
     
     gex_data = []
