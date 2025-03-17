@@ -868,7 +868,7 @@ def main():
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
     # Futures Hedge Recommendation based on net delta
-    net_delta = df_ticker.assign(weighted_delta = df_ticker["delta"] * df_ticker["open_interest"])["weighted_delta"].sum()
+    net_delta = df_ticker.assign(weighted_delta=df_ticker["delta"] * df_ticker["open_interest"])["weighted_delta"].sum()
     if net_delta > 0:
         futures_hedge = "Short BTC Futures"
     elif net_delta < 0:
@@ -880,7 +880,7 @@ def main():
         "Value": [net_delta, futures_hedge]
     })
     st.subheader("Futures Hedge Recommendation")
-    st.dataframe(hedge_table.style.hide_index())
+    st.dataframe(hedge_table.style.hide(axis="index"))
     
     rv_series = calculate_daily_realized_volatility_series(df_kraken)
     rv_scalar = rv_series.iloc[-1] if not rv_series.empty else np.nan
@@ -914,7 +914,7 @@ def main():
             best_candidate = df_ev_clean.loc[df_ev_clean["EV (%)"].idxmax()]
             best_strike = best_candidate["Strike"]
             st.write("Candidate Strikes and their Expected Value (EV %):")
-            st.dataframe(df_ev_clean.style.hide_index())
+            st.dataframe(df_ev_clean.style.hide(axis="index"))
             st.write(f"Recommended Strike based on highest EV: {best_strike}")
         else:
             st.write("No candidates found with valid EV values.")
@@ -972,7 +972,7 @@ def main():
     df_gex = pd.DataFrame(gex_data)
     if not df_gex.empty:
         st.subheader("Gamma Exposure (GEX) by Strike")
-        st.dataframe(df_gex.style.hide_index())
+        st.dataframe(df_gex.style.hide(axis="index"))
         plot_gex_by_strike(df_gex)
         plot_net_gex(df_gex, spot_price)
     
@@ -988,7 +988,7 @@ def main():
         columns_to_show = ["instrument", "strike", "option_type", "open_interest", "delta", "iv", "EV", "gex", "composite_score", "strategy"]
         df_combined = df_combined[columns_to_show]
         st.subheader("Combined Composite Score Table")
-        st.dataframe(df_combined.style.hide_index())
+        st.dataframe(df_combined.style.hide(axis="index"))
     else:
         st.write("Composite score data is not available.")
 
