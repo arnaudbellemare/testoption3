@@ -356,7 +356,7 @@ def compute_gamma_value(spot, strike, sigma, T):
     d1 = (np.log(spot/strike) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
     return norm.pdf(d1) / (spot * sigma * np.sqrt(T))
 
-# New function: compute EV using realized volatility (rv) instead of 0.0.
+# New EV computation using realized volatility (rv)
 def compute_ev(adjusted_iv, rv, T, position_side):
     if position_side.lower() == "short":
         return (((adjusted_iv**2 - rv**2) * T) / 2) * 100
@@ -389,7 +389,7 @@ def build_ticker_list_with_metrics(all_instruments, spot, T, smile_df, rv, posit
         except Exception:
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
-        ev_value = compute_ev(adjusted_iv, rv, T, position_side)  # Updated EV using realized vol (rv)
+        ev_value = compute_ev(adjusted_iv, rv, T, position_side)  # EV computed using realized vol (rv)
         gamma_val = compute_gamma_value(spot, strike, adjusted_iv, T) if adjusted_iv > 0 and T > 0 else 0
         gex_value = gamma_val * ticker_data["open_interest"] * (spot**2)
         ticker_list.append({
@@ -826,7 +826,7 @@ def main():
         })
     smile_df = build_smile_df(preliminary_ticker_list)
     
-    # Calculate realized volatility from Kraken data (rv)
+    # Compute realized volatility (rv) from Kraken data
     rv = calculate_btc_annualized_volatility_daily(df_kraken)
     
     global ticker_list
@@ -971,6 +971,24 @@ def main():
         st.dataframe(df_combined)
     else:
         st.write("Composite score data is not available.")
+    
+    ###########################################
+    # Futures Hedge Recommendation Table
+    ###########################################
+    # Compute net delta (sum of delta * open_interest) from the ticker list.
+    df_options = pd.DataFrame(ticker_list)
+    if not df_options.empty:
+        net_delta = (df_options["delta"] * df_options["open_interest"]).sum()
+        # For a long volatility position, if net delta is positive, futures hedge should be short.
+        hedge_direction = "Short" if net_delta > 0 else ("Long" if net_delta < 0 else "Neutral")
+        hedge_table = pd.DataFrame({
+            "Net Delta": [net_delta],
+            "Futures Hedge Direction": [hedge_direction]
+        })
+        st.subheader("Futures Hedge Recommendation (Based on Net Delta)")
+        st.dataframe(hedge_table)
+    else:
+        st.write("No options data available for futures hedge recommendation.")
 
 if __name__ == '__main__':
     main()
