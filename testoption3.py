@@ -420,9 +420,9 @@ def calculate_atm_straddle_ev(ticker_list, spot, T, rv, position_side="short"):
     for strike, data in atm_strikes.items():
         avg_iv = data["iv_sum"] / data["count"]
         ev_value = compute_ev(avg_iv, rv, T, position_side)
-        ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
+        ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
-    return df_ev.sort_values("EV (%)", ascending=False)
+    return df_ev.sort_values("EV", ascending=False)
 
 def calculate_limited_otm_put_ev(ticker_list, spot, T, rv, position_side="long"):
     tolerance = spot * 0.10  
@@ -441,9 +441,9 @@ def calculate_limited_otm_put_ev(ticker_list, spot, T, rv, position_side="long")
     for strike, data in group.items():
         avg_iv = data["iv_sum"] / data["count"]
         ev_value = compute_ev(avg_iv, rv, T, position_side)
-        ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
+        ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
-    return df_ev.sort_values("EV (%)", ascending=False)
+    return df_ev.sort_values("EV", ascending=False)
 
 def calculate_call_spread_ev(ticker_list, spot, T, rv, position_side="short"):
     tolerance = spot * 0.10  
@@ -462,9 +462,9 @@ def calculate_call_spread_ev(ticker_list, spot, T, rv, position_side="short"):
     for strike, data in group.items():
         avg_iv = data["iv_sum"] / data["count"]
         ev_value = compute_ev(avg_iv, rv, T, position_side)
-        ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
+        ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
-    return df_ev.sort_values("EV (%)", ascending=False)
+    return df_ev.sort_values("EV", ascending=False)
 
 def calculate_strangle_ev(ticker_list, spot, T, rv, position_side="short"):
     tolerance = spot * 0.10  
@@ -484,9 +484,9 @@ def calculate_strangle_ev(ticker_list, spot, T, rv, position_side="short"):
     for strike, data in group.items():
         avg_iv = data["iv_sum"] / data["count"]
         ev_value = compute_ev(avg_iv, rv, T, position_side)
-        ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
+        ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
-    return df_ev.sort_values("EV (%)", ascending=False)
+    return df_ev.sort_values("EV", ascending=False)
 
 def calculate_naked_call_ev(ticker_list, spot, T, rv, position_side="short"):
     candidates = [item for item in ticker_list if item["option_type"] == "C" and item["strike"] > spot]
@@ -504,9 +504,9 @@ def calculate_naked_call_ev(ticker_list, spot, T, rv, position_side="short"):
     for strike, data in group.items():
         avg_iv = data["iv_sum"] / data["count"]
         ev_value = compute_ev(avg_iv, rv, T, position_side)
-        ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
+        ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
-    return df_ev.sort_values("EV (%)", ascending=False)
+    return df_ev.sort_values("EV", ascending=False)
 
 def calculate_small_atm_straddle_ev(ticker_list, spot, T, rv, position_side="short"):
     return calculate_atm_straddle_ev(ticker_list, spot, T, rv, position_side)
@@ -930,7 +930,6 @@ def main():
     # Calculate realized volatility (rv) from Kraken data
     rv = calculate_btc_annualized_volatility_daily(df_kraken)
     
-    # Build ticker list for EV calculation (initially with "short" side)
     global ticker_list
     ticker_list = build_ticker_list_with_metrics(all_instruments, spot_price, T_YEARS, smile_df, rv, position_side="short")
     
@@ -1010,21 +1009,19 @@ def main():
         st.subheader("EV Analysis")
         st.write("EV analysis for the selected position is not implemented yet.")
     
-    # Update ticker_list EV for both short and long scenarios
-    short_ticker_list = update_ev_for_position(ticker_list.copy(), rv, T_YEARS, "short")
-    long_ticker_list = update_ev_for_position(ticker_list.copy(), rv, T_YEARS, "long")
-    short_scores = compute_composite_scores(short_ticker_list, position_side="short")
-    long_scores = compute_composite_scores(long_ticker_list, position_side="long")
-    df_short = pd.DataFrame(short_scores)
-    df_long = pd.DataFrame(long_scores)
-    df_combined = pd.concat([df_short, df_long], ignore_index=True)
-    if "EV" in df_combined.columns and "open_interest" in df_combined.columns:
-        columns_to_show = ["instrument", "strike", "option_type", "open_interest", "delta", "iv", "EV", "gex", "composite_score", "strategy"]
-        df_combined = df_combined[columns_to_show]
-        st.subheader("Combined Composite Score Table")
-        st.dataframe(df_combined.style.hide(axis="index"))
+    # EV Analysis Block
+    if df_ev is not None and not df_ev.empty and not df_ev["EV"].isna().all():
+        df_ev_clean = df_ev.dropna(subset=["EV"])
+        if not df_ev_clean.empty:
+            best_candidate = df_ev_clean.loc[df_ev_clean["EV"].idxmax()]
+            best_strike = best_candidate["Strike"]
+            st.write("Candidate Strikes and their Expected Value (EV):")
+            st.dataframe(df_ev_clean.style.hide(axis="index"))
+            st.write(f"Recommended Strike based on highest EV: {best_strike}")
+        else:
+            st.write("No candidates found with valid EV values.")
     else:
-        st.write("Composite score data is not available.")
+        st.write("No candidates found within tolerance for EV calculation.")
     
     if st.button("Simulate Trade"):
         st.write("Simulating trade based on recommendation...")
@@ -1078,7 +1075,26 @@ def main():
         gex_data.append({"strike": strike, "gex": gex, "option_type": option_type})
     df_gex = pd.DataFrame(gex_data)
     if not df_gex.empty:
+        st.subheader("Net Gamma Exposure by Strike")
         plot_net_gex(df_gex, spot_price)
     
+    ###########################################
+    # Composite Score Table (Using Actual Data)
+    ###########################################
+    short_ticker_list = update_ev_for_position(ticker_list.copy(), rv, T_YEARS, "short")
+    long_ticker_list = update_ev_for_position(ticker_list.copy(), rv, T_YEARS, "long")
+    short_scores = compute_composite_scores(short_ticker_list, position_side="short")
+    long_scores = compute_composite_scores(long_ticker_list, position_side="long")
+    df_short = pd.DataFrame(short_scores)
+    df_long = pd.DataFrame(long_scores)
+    df_combined = pd.concat([df_short, df_long], ignore_index=True)
+    if "EV" in df_combined.columns and "open_interest" in df_combined.columns:
+        columns_to_show = ["instrument", "strike", "option_type", "open_interest", "delta", "iv", "EV", "gex", "composite_score", "strategy"]
+        df_combined = df_combined[columns_to_show]
+        st.subheader("Combined Composite Score Table")
+        st.dataframe(df_combined.style.hide(axis="index"))
+    else:
+        st.write("Composite score data is not available.")
+
 if __name__ == '__main__':
     main()
