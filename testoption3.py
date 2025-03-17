@@ -1027,7 +1027,23 @@ def main():
         st.write("Simulating trade based on recommendation...")
         st.write("Position Size: Adjust based on capital (e.g., 1-5% of portfolio for chosen risk tolerance)")
         st.write("Monitor price and volatility in real-time and adjust hedges dynamically.")
-    
+        ###########################################
+    # Composite Score Table (Using Actual Data)
+    ###########################################
+    short_ticker_list = update_ev_for_position(ticker_list.copy(), rv, T_YEARS, "short")
+    long_ticker_list = update_ev_for_position(ticker_list.copy(), rv, T_YEARS, "long")
+    short_scores = compute_composite_scores(short_ticker_list, position_side="short")
+    long_scores = compute_composite_scores(long_ticker_list, position_side="long")
+    df_short = pd.DataFrame(short_scores)
+    df_long = pd.DataFrame(long_scores)
+    df_combined = pd.concat([df_short, df_long], ignore_index=True)
+    if "EV" in df_combined.columns and "open_interest" in df_combined.columns:
+        columns_to_show = ["instrument", "strike", "option_type", "open_interest", "delta", "iv", "EV", "gex", "composite_score", "strategy"]
+        df_combined = df_combined[columns_to_show]
+        st.subheader("Combined Composite Score Table")
+        st.dataframe(df_combined.style.hide(axis="index"))
+    else:
+        st.write("Composite score data is not available.")
     st.subheader("Volatility Smile at Latest Timestamp")
     latest_ts = df["date_time"].max()
     smile_df_latest = df[df["date_time"] == latest_ts]
@@ -1077,23 +1093,6 @@ def main():
     if not df_gex.empty:
         plot_net_gex(df_gex, spot_price)
     
-    ###########################################
-    # Composite Score Table (Using Actual Data)
-    ###########################################
-    short_ticker_list = update_ev_for_position(ticker_list.copy(), rv, T_YEARS, "short")
-    long_ticker_list = update_ev_for_position(ticker_list.copy(), rv, T_YEARS, "long")
-    short_scores = compute_composite_scores(short_ticker_list, position_side="short")
-    long_scores = compute_composite_scores(long_ticker_list, position_side="long")
-    df_short = pd.DataFrame(short_scores)
-    df_long = pd.DataFrame(long_scores)
-    df_combined = pd.concat([df_short, df_long], ignore_index=True)
-    if "EV" in df_combined.columns and "open_interest" in df_combined.columns:
-        columns_to_show = ["instrument", "strike", "option_type", "open_interest", "delta", "iv", "EV", "gex", "composite_score", "strategy"]
-        df_combined = df_combined[columns_to_show]
-        st.subheader("Combined Composite Score Table")
-        st.dataframe(df_combined.style.hide(axis="index"))
-    else:
-        st.write("Composite score data is not available.")
 
 if __name__ == '__main__':
     main()
