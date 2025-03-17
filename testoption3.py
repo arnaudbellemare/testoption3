@@ -356,13 +356,20 @@ def compute_gamma_value(spot, strike, sigma, T):
     d1 = (np.log(spot/strike) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
     return norm.pdf(d1) / (spot * sigma * np.sqrt(T))
 
+# New function: compute EV using realized volatility (rv) instead of 0.0.
+def compute_ev(adjusted_iv, rv, T, position_side):
+    if position_side.lower() == "short":
+        return (((adjusted_iv**2 - rv**2) * T) / 2) * 100
+    else:
+        return -(((rv**2 - adjusted_iv**2) * T) / 2) * 100
+
 def adjust_volatility_with_smile(strike, smile_df):
     sorted_smile = smile_df.sort_values("strike")
     strikes = sorted_smile["strike"].values
     ivs = sorted_smile["iv"].values
     return np.interp(strike, strikes, ivs)
 
-def build_ticker_list_with_metrics(all_instruments, spot, T, smile_df):
+def build_ticker_list_with_metrics(all_instruments, spot, T, smile_df, rv, position_side="short"):
     ticker_list = []
     for instrument in all_instruments:
         ticker_data = fetch_ticker(instrument)
@@ -382,7 +389,7 @@ def build_ticker_list_with_metrics(all_instruments, spot, T, smile_df):
         except Exception:
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
-        ev_value = (((adjusted_iv**2 - 0.0) * T) / 2) * 100  # Placeholder EV formula
+        ev_value = compute_ev(adjusted_iv, rv, T, position_side)  # Updated EV using realized vol (rv)
         gamma_val = compute_gamma_value(spot, strike, adjusted_iv, T) if adjusted_iv > 0 and T > 0 else 0
         gex_value = gamma_val * ticker_data["open_interest"] * (spot**2)
         ticker_list.append({
@@ -587,7 +594,6 @@ def evaluate_trade_strategy(df, spot_price, risk_tolerance="Moderate", df_iv_agg
     else:
         market_regime = "Neutral"
     vol_regime = market_regime
-    # Fix: explicitly check if historical_vols is not None and not empty.
     vrp_regime = classify_vrp_regime(current_vrp, historical_vols) if (historical_vols is not None and len(historical_vols) > 0) else "Neutral"
     call_items = [item for item in ticker_list if item["option_type"] == "C"]
     put_items = [item for item in ticker_list if item["option_type"] == "P"]
@@ -820,10 +826,12 @@ def main():
         })
     smile_df = build_smile_df(preliminary_ticker_list)
     
-    global ticker_list
-    ticker_list = build_ticker_list_with_metrics(all_instruments, spot_price, T_YEARS, smile_df)
+    # Calculate realized volatility from Kraken data (rv)
+    rv = calculate_btc_annualized_volatility_daily(df_kraken)
     
-    rv_vol = calculate_btc_annualized_volatility_daily(df_kraken)
+    global ticker_list
+    ticker_list = build_ticker_list_with_metrics(all_instruments, spot_price, T_YEARS, smile_df, rv, position_side="short")
+    
     daily_rv_series = calculate_daily_realized_volatility_series(df_kraken)
     daily_rv = daily_rv_series.tolist()
     daily_iv = compute_daily_average_iv(df_iv_agg)
