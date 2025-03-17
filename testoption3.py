@@ -349,10 +349,6 @@ def compute_gex(row, S, oi):
 ###########################################
 # EV and Gamma Exposure (GEX) Calculations
 ###########################################
-def adjust_ev(ev_value, position_side):
-    return ev_value  # EV sign is determined in compute_ev
-
-# Updated compute_ev using realized volatility (rv)
 def compute_ev(adjusted_iv, rv, T, position_side):
     if position_side.lower() == "short":
         return (((adjusted_iv**2 - rv**2) * T) / 2) * 100
@@ -389,7 +385,7 @@ def build_ticker_list_with_metrics(all_instruments, spot, T, smile_df, rv, posit
         except Exception:
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
-        ev_value = compute_ev(adjusted_iv, rv, T, position_side)  # Updated EV using rv
+        ev_value = compute_ev(adjusted_iv, rv, T, position_side)  # EV using realized volatility (rv)
         gamma_val = compute_gamma_value(spot, strike, adjusted_iv, T) if adjusted_iv > 0 and T > 0 else 0
         gex_value = gamma_val * ticker_data["open_interest"] * (spot**2)
         ticker_list.append({
@@ -425,7 +421,7 @@ def calculate_atm_straddle_ev(ticker_list, spot, T, rv, position_side="short"):
         avg_iv = data["iv_sum"] / data["count"]
         ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
         ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
-        ev_value = adjust_ev(ev_value, position_side)
+        ev_value = compute_ev(avg_iv, rv, T, position_side)  # Use compute_ev for adaptation
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
     return df_ev.sort_values("EV (%)", ascending=False)
@@ -448,7 +444,7 @@ def calculate_limited_otm_put_ev(ticker_list, spot, T, rv, position_side="long")
         avg_iv = data["iv_sum"] / data["count"]
         ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
         ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
-        ev_value = adjust_ev(ev_value, position_side)
+        ev_value = compute_ev(avg_iv, rv, T, position_side)
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
     return df_ev.sort_values("EV (%)", ascending=False)
@@ -471,7 +467,7 @@ def calculate_call_spread_ev(ticker_list, spot, T, rv, position_side="short"):
         avg_iv = data["iv_sum"] / data["count"]
         ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
         ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
-        ev_value = adjust_ev(ev_value, position_side)
+        ev_value = compute_ev(avg_iv, rv, T, position_side)
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
     return df_ev.sort_values("EV (%)", ascending=False)
@@ -495,7 +491,7 @@ def calculate_strangle_ev(ticker_list, spot, T, rv, position_side="short"):
         avg_iv = data["iv_sum"] / data["count"]
         ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
         ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
-        ev_value = adjust_ev(ev_value, position_side)
+        ev_value = compute_ev(avg_iv, rv, T, position_side)
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
     return df_ev.sort_values("EV (%)", ascending=False)
@@ -517,7 +513,7 @@ def calculate_naked_call_ev(ticker_list, spot, T, rv, position_side="short"):
         avg_iv = data["iv_sum"] / data["count"]
         ev_value = (((avg_iv**2 - rv**2) * T) / 2) * 100
         ev_value = ev_value / risk_factor if 'risk_factor' in globals() else ev_value
-        ev_value = adjust_ev(ev_value, position_side)
+        ev_value = compute_ev(avg_iv, rv, T, position_side)
         ev_candidates.append({"Strike": strike, "Avg IV": avg_iv, "EV (%)": ev_value})
     df_ev = pd.DataFrame(ev_candidates)
     return df_ev.sort_values("EV (%)", ascending=False)
