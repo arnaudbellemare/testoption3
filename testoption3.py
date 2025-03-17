@@ -350,7 +350,7 @@ def compute_gex(row, S, oi):
 # EV and Gamma Exposure (GEX) Calculations
 ###########################################
 def adjust_ev(ev_value, position_side):
-    return ev_value  # EV sign will be determined by the compute_ev function
+    return ev_value  # EV sign is determined in compute_ev
 
 # Updated compute_ev using realized volatility (rv)
 def compute_ev(adjusted_iv, rv, T, position_side):
@@ -389,7 +389,7 @@ def build_ticker_list_with_metrics(all_instruments, spot, T, smile_df, rv, posit
         except Exception:
             continue
         delta_est = norm.cdf(d1) if option_type == "C" else norm.cdf(d1) - 1
-        ev_value = compute_ev(adjusted_iv, rv, T, position_side)  # EV using realized volatility
+        ev_value = compute_ev(adjusted_iv, rv, T, position_side)  # Updated EV using rv
         gamma_val = compute_gamma_value(spot, strike, adjusted_iv, T) if adjusted_iv > 0 and T > 0 else 0
         gex_value = gamma_val * ticker_data["open_interest"] * (spot**2)
         ticker_list.append({
@@ -832,6 +832,9 @@ def main():
     global ticker_list
     ticker_list = build_ticker_list_with_metrics(all_instruments, spot_price, T_YEARS, smile_df, rv, position_side="short")
     
+    # Create a DataFrame from ticker_list for hedge calculations
+    df_ticker = pd.DataFrame(ticker_list)
+    
     daily_rv_series = calculate_daily_realized_volatility_series(df_kraken)
     daily_rv = daily_rv_series.tolist()
     daily_iv = compute_daily_average_iv(df_iv_agg)
@@ -865,7 +868,6 @@ def main():
     st.write(f"**Hedge Action:** {trade_decision['hedge_action']}")
     
     # Futures Hedge Recommendation based on net delta
-    # For a long vol position, if net delta is positive, futures should be short, and vice versa.
     net_delta = df_ticker.assign(weighted_delta = df_ticker["delta"] * df_ticker["open_interest"])["weighted_delta"].sum()
     if net_delta > 0:
         futures_hedge = "Short BTC Futures"
