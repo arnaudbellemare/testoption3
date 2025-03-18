@@ -23,7 +23,7 @@ def calculate_ewma_roger_satchell_volatility(price_data, span):
     return np.sqrt(ewma_rs.clip(lower=0))
 
 def compute_realized_volatility_5min(df, annualize_days=365):
-    # This function is not used in VRP since our data lacks OHLC fields.
+    # This function is not used in the VRP calculation because our data lacks OHLC fields.
     df = df.copy()
     df['rs'] = (
         np.log(df['high'] / df['close']) * np.log(df['high'] / df['open']) +
@@ -600,7 +600,6 @@ def plot_open_interest_delta(df, all_instruments, spot_price):
             title="Open Interest & Delta for Options"
          )
         st.plotly_chart(fig_bubble, use_container_width=True)
-        
         tot = df_ticker["open_interest"].sum()
         rat = (df_ticker.apply(lambda r: r["open_interest"] if r["option_type"]=="P" and r["delta"]<0 else 0, axis=1).sum() / tot) if tot else 0
         stat = "Risk-Off" if rat > 0.5 else "Risk-On"
@@ -779,9 +778,7 @@ def plot_combined_vrp(df, windows):
     combined_frames = []
     for strike, group in df_combined.groupby("k"):
         group = group.sort_index()
-        # Instead of computing Roger–Satchell volatility (which requires OHLC),
-        # we compute a simple rolling volatility on log returns of mark_price_close.
-        # Here, window=12 means using the last 12 five-minute bars (~1 hour of data).
+        # Compute simple rolling volatility on log returns of mark_price_close.
         rets = np.log(group["mark_price_close"] / group["mark_price_close"].shift(1))
         for win_str, col_name in windows.items():
             group[col_name] = rets.rolling(window=12, min_periods=1).std() * np.sqrt(12)
@@ -1007,7 +1004,7 @@ def main():
         )])
         fig_candle.update_layout(title="Candlestick Chart (Single Instrument)", width=1000, height=600)
         st.plotly_chart(fig_candle)
-
+        
     # Risk Adjustment Factor
     risk_factor = compute_risk_adjustment_factor_cf(df_krak, alpha=0)
     st.write(f"Risk Adjustment Factor (CF): {risk_factor:.2f}")
@@ -1035,16 +1032,17 @@ def main():
             subdf = d_puts[d_puts["instrument_name"] == instr]
         if subdf.empty:
             continue
+        # Compute GEX (for net GEX chart)
         gamma_val = compute_gamma(subdf.iloc[0], spot_price)
-        delta_val = compute_delta(subdf.iloc[0], spot_price)
         gex_list.append({
             "strike": strike_val,
             "gex": compute_gex(subdf.iloc[0], spot_price, td["open_interest"]),
             "option_type": otype
         })
+        # Compute Delta (for net delta chart)
         delta_list.append({
             "strike": strike_val,
-            "delta": delta_val
+            "delta": compute_delta(subdf.iloc[0], spot_price)
         })
     if gex_list:
         df_gex = pd.DataFrame(gex_list)
