@@ -1067,9 +1067,5 @@ def main():
     if not df_gex.empty:
         plot_net_gex(df_gex, spot_price)
     
-# Build the ticker list (ensure dft, d_calls, d_puts are available)
-ticker_list = build_ticker_list(dft, d_calls, d_puts, spot_price)
-# Call the function to plot delta balance
-plot_delta_balance(ticker_list, spot_price)
 if __name__ == '__main__':
     main() 
